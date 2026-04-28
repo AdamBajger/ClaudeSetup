@@ -1,0 +1,20 @@
+Port 2222
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+HostKey /home/claude/.ssh/host-keys/ssh_host_rsa_key
+HostKey /home/claude/.ssh/host-keys/ssh_host_ed25519_key
+
+PidFile /home/claude/.ssh/sshd.pid
+
+PermitRootLogin no
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+X11Forwarding no
+PrintMotd yes
+AllowUsers claude
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/ssh/sftp-server

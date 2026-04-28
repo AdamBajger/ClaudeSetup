@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "claude-cli.fullname" . }}
+  labels:
+    {{- include "claude-cli.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # PVC RWO — rolling deadlocks on attach.
+  selector:
+    matchLabels:
+      {{- include "claude-cli.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "claude-cli.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- $gpuNS := include "claude-cli.gpu.nodeSelector" . | trim }}
+      {{- if $gpuNS }}
+      nodeSelector:
+        {{- $gpuNS | nindent 8 }}
+      {{- end }}
+      # PodSecurity "restricted" profile compliance.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: init-data
+          image: busybox:1.36
+          command: [sh, -c]
+          args:
+            - |
+              set -e
+              mkdir -p /data/claude /data/ssh /data/ssh/host-keys /data/gh /data/workspaces
+              chmod 700 /data/ssh /data/ssh/host-keys
+              find /data/ssh/host-keys -type f -exec chmod 600 {} \;
+              find /data/ssh/host-keys -type f -name "*.pub" -exec chmod 644 {} \;
+              if [ -d /data/claude.json ]; then rmdir /data/claude.json || true; fi
+              # Seed .claude.json with onboarding flags so TUI doesn't relaunch
+              # the login wizard. CLI augments this on first run; only seed if
+              # the file is missing or still the placeholder {}.
+              if [ ! -s /data/claude.json ] || [ "$(cat /data/claude.json)" = '{}' ]; then
+                printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > /data/claude.json
+              fi
+              [ -e /data/.bash_history ] || touch /data/.bash_history
+              # Bootstrap credentials.json from Secret on first start only.
+              # CLI rotates the token in place afterwards — don't clobber.
+              if [ -s /bootstrap/credentials.json ] && [ ! -e /data/claude/.credentials.json ]; then
+                cp /bootstrap/credentials.json /data/claude/.credentials.json
+                chmod 600 /data/claude/.credentials.json
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: bootstrap, mountPath: /bootstrap, readOnly: true }
+      containers:
+        - name: claude
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - { name: ssh, containerPort: 2222, protocol: TCP }
+          env:
+            - name: AUTHORIZED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claude-cli.secretName" . }}
+                  key: AUTHORIZED_KEYS
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claude-cli.secretName" . }}
+                  key: GH_TOKEN
+                  optional: true
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claude-cli.secretName" . }}
+                  key: HF_TOKEN
+                  optional: true
+            {{- if .Values.claude.autoStartTmux.enabled }}
+            - name: CLAUDE_AUTOSTART_TMUX_SESSION_NAME
+              value: {{ .Values.claude.autoStartTmux.tmuxSessionName | quote }}
+            - name: CLAUDE_AUTOSTART_CLAUDE_COMMAND
+              value: {{ .Values.claude.autoStartTmux.claudeCommand | quote }}
+            {{- end }}
+          volumeMounts:
+            - { name: data, mountPath: /home/claude/.claude.json, subPath: claude.json }
+            - { name: data, mountPath: /home/claude/.claude,      subPath: claude }
+            - { name: data, mountPath: /home/claude/.ssh,         subPath: ssh }
+            - { name: data, mountPath: /home/claude/.config/gh,   subPath: gh }
+            - { name: data, mountPath: /home/claude/workspaces,   subPath: workspaces }
+            - { name: data, mountPath: /home/claude/.bash_history, subPath: .bash_history }
+          resources:
+            {{- $res := deepCopy .Values.resources }}
+            {{- $gpuLim := include "claude-cli.gpu.limits" . | trim }}
+            {{- if $gpuLim }}
+            {{- $_ := set $res "limits" (mergeOverwrite (dict) ($res.limits | default dict) (fromYaml $gpuLim)) }}
+            {{- end }}
+            {{- toYaml $res | nindent 12 }}
+          readinessProbe:
+            tcpSocket: { port: ssh }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 15
+          livenessProbe:
+            tcpSocket: { port: ssh }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 15
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "claude-cli.fullname" . }}-data
+        - name: bootstrap
+          secret:
+            secretName: {{ include "claude-cli.secretName" . }}
+            items:
+              - key: credentials.json
+                path: credentials.json
+                mode: 0400
+            optional: true   # Secret may exist without credentialsJson set

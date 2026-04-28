@@ -1,0 +1,5 @@
+.env
+.env/
+k8s/helm/claude-cli/values.yaml
+container_mounts/
+.claude/

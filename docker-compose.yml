@@ -1,0 +1,58 @@
+# claude-cli-cloud-run — pre-built Claude Code dev environment (compose).
+#
+# SSH enabled. Set AUTHORIZED_KEYS in .env (your public key) and connect:
+#   ssh -p 2222 claude@localhost
+# `docker exec -it claude-dev bash` also works for a quick shell.
+#
+# SSH host keys are regenerated inside the container on every recreate (no
+# persistence) — your SSH client will warn on first connect after each rebuild.
+# Run `ssh-keygen -R '[localhost]:2222'` to clear the stale fingerprint.
+#
+# Usage:
+#   cp .env.example .env        # set GH_TOKEN + AUTHORIZED_KEYS
+#   docker compose up -d --build
+#   ssh -p 2222 claude@localhost
+
+services:
+  claude:
+    build:
+      context: .
+      dockerfile: claude.Dockerfile
+    image: adambajger/claude-cli-cloud-run:0.2.0
+    container_name: claude-dev
+    hostname: claude-dev
+    restart: unless-stopped
+
+    # Default CMD from Dockerfile runs sshd -D -e in the foreground.
+    # Override on the CLI with `docker compose run claude bash` for one-off shells.
+
+    ports:
+      # Host 2222 → container 2222. sshd runs as the unprivileged claude user,
+      # which cannot bind <1024, so the in-container port is also 2222.
+      - "2222:2222"
+
+    environment:
+      # Optional GitHub PAT. If set, the entrypoint runs `gh auth login
+      # --with-token` on first start (skipped if state/gh/ already shows
+      # authenticated). Otherwise run `gh auth login` interactively yourself.
+      GH_TOKEN: "${GH_TOKEN:-}"
+
+      # Optional: pubkey(s) to merge into ~claude/.ssh/authorized_keys on start.
+      # Multiline values OK. Merged additively + deduped with the bind-mounted
+      # authorized_keys file below, so either source works.
+      AUTHORIZED_KEYS: "${AUTHORIZED_KEYS:-}"
+
+    volumes:
+      # All persisted state lives under ./container_mounts/, mirroring the
+      # in-container path layout so the mapping is obvious at a glance.
+
+      # Claude state — auth, settings, sessions, plugins, projects.
+      - ./container_mounts/home/claude/.claude.json:/home/claude/.claude.json
+      - ./container_mounts/home/claude/.claude:/home/claude/.claude
+
+      # GitHub CLI auth — `gh auth login` writes here; survives restarts.
+      - ./container_mounts/home/claude/.config/gh:/home/claude/.config/gh
+      - ./container_mounts/home/claude/.bash_history:/home/claude/.bash_history
+
+      # Workspaces — clone repos here so changes persist on the host.
+      - ./container_mounts/home/claude/workspaces:/home/claude/workspaces

@@ -1,0 +1,27 @@
+{{- $svc := printf "%s-ssh" (include "claude-cli.fullname" .) -}}
+Release "{{ .Release.Name }}" installed in namespace "{{ .Release.Namespace }}".
+
+Wait for the SSH endpoint:
+  kubectl -n {{ .Release.Namespace }} get svc {{ $svc }} -w
+
+Connect (port {{ .Values.service.port }}):
+  ssh -p {{ .Values.service.port }} claude@<EXTERNAL-IP-or-NODE-IP>
+
+Auth:
+- Secret: {{ include "claude-cli.secretName" . }}
+- credentials.json bootstrapped onto PVC by init container on first start;
+  CLI then owns the file (rotates tokens in place).
+- Re-bootstrap from Secret:
+    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "claude-cli.fullname" . }} -- \
+      rm /home/claude/.claude/.credentials.json
+    kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "claude-cli.fullname" . }}
+
+{{- if and (not .Values.auth.existingSecret) (eq .Values.auth.authorizedKeys "") }}
+
+WARNING: auth.authorizedKeys is empty. SSH will reject all logins.
+{{- end }}
+{{- if and (not .Values.auth.existingSecret) (eq .Values.auth.credentialsJson "") }}
+
+WARNING: auth.credentialsJson is empty. claude CLI will prompt for login.
+Source on host: cat ~/.claude/.credentials.json
+{{- end }}

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: claude-cli
+description: Pre-built Claude Code dev environment with SSH access
+type: application
+version: 0.2.1
+appVersion: "0.3.1"
+home: https://github.com/adambajger/claurst
+sources:
+  - https://github.com/adambajger/claurst
+maintainers:
+  - name: Adam Bajger
+keywords:
+  - claude
+  - claude-code
+  - ssh
+  - dev-environment

@@ -1,0 +1,64 @@
+# claude-cli values
+# Required: auth.authorizedKeys (or auth.existingSecret).
+# Recommended: provide auth.credentialsJson via SOPS/sealed-secrets/external-secrets
+# rather than plaintext here, OR pre-create a Secret and set auth.existingSecret.
+
+image:
+  repository: adambajger/claude-cli-cloud-run
+  tag: "latest"
+  pullPolicy: Always    # Always — :latest tag, ensure cluster picks up new pushes
+
+auth:
+  # Use a pre-existing Secret (managed by SOPS / sealed-secrets / ESO). When set,
+  # the chart will NOT create a Secret. The Secret must contain keys:
+  #   AUTHORIZED_KEYS (required), credentials.json (optional), GH_TOKEN (optional), HF_TOKEN (optional)
+  existingSecret: ""
+
+  # Fallback: chart creates a Secret from these values. Plaintext in values.yaml —
+  # only use for local/testing or when the values file itself is encrypted.
+  authorizedKeys: |-
+    ssh-ed25519 YOUR_PUBLIC_KEY john.doe@proton.me
+  # Raw contents of ~/.claude/.credentials.json (single-line JSON, or YAML
+  # block scalar). Bootstrapped onto the PVC on first pod start; CLI then owns
+  # the file and refreshes tokens in place. To re-bootstrap from this value,
+  # delete the PVC's copy and restart the pod:
+  #   kubectl exec deploy/<release>-claude-cli -- rm /home/claude/.claude/.credentials.json
+  #   kubectl rollout restart deploy/<release>-claude-cli
+  # Source on host:
+  #   cat ~/.claude/.credentials.json
+  credentialsJson: |-
+    {"copy your full":".claude/.credentials.json content here"}}
+  ghToken: "gho_op..."           # optional GH_TOKEN
+  hfToken: "hf_..."              # optional HF_TOKEN (HuggingFace)
+
+service:
+  type: ClusterIP       # LoadBalancer | NodePort | ClusterIP
+  port: 2222
+
+persistence:
+  size: 20Gi
+  storageClass: ""      # "" -> cluster default
+
+resources:
+  requests: { cpu: 200m, memory: 512Mi }
+  limits:   { cpu: "2",  memory: 8Gi }
+
+# Auto-start claude in detached tmux session. Attach: `tmux attach -t <tmuxSessionName>`.
+claude:
+  autoStartTmux:
+    enabled: true
+    tmuxSessionName: "claude"
+    claudeCommand: "claude --remote-control --dangerously-skip-permissions" # --resume \"Your selected session name\""
+
+# GPU request — mirrors resolve_gpu() from job-submitting utility.
+# Whole-GPU types ("A100" | "A40" | "H100" | "Tesla P100") add
+#   nvidia.com/gpu: <count>            into resources.limits
+#   nvidia.com/gpu.product: <product>  into nodeSelector
+# MIG types ("mig-1g.10gb" | "mig-2g.20gb") add only
+#   nvidia.com/<mig_type>: <count>     into resources.limits  (no nodeSelector)
+# All requested GPUs must reside on the same node.
+# Product names: https://grafana.rationai.cloud.trusted.e-infra.cz/d/b755d03d-d664-486a-8fda-34c59377bf2d
+# Leave commented to deploy without GPU.
+# gpu:
+#   type: "A100"          # A100 | A40 | H100 | Tesla P100 | mig-1g.10gb | mig-2g.20gb
+#   count: 1

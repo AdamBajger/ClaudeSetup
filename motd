@@ -1,0 +1,15 @@
+=========================================================================
+  claude-cli-cloud-run — pre-built Claude Code dev environment
+=========================================================================
+  Tools:     claude, uv, cargo, rustc, git, gh, vim, tmux, ripgrep, jq
+  Workdir:   ~/workspaces  (bind-mounted; clone repos here)
+
+  Start claude:
+      claude --dangerously-skip-permissions
+
+  GitHub auth (one of):
+      gh auth login                  # interactive
+      export GH_TOKEN=ghp_...        # or set GH_TOKEN in .env
+
+  Persisted via mounts: ~/.claude{,.json}, ~/.ssh, ~/.config/gh, ~/workspaces.
+=========================================================================
