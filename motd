@@ -1,15 +1,34 @@
 =========================================================================
   claude-cli-cloud-run — pre-built Claude Code dev environment
 =========================================================================
-  Tools:     claude, uv, cargo, rustc, git, gh, vim, tmux, ripgrep, jq
+  Tools:     claude, uv, cargo, rustc, clippy, rustfmt, git, gh, vim,
+             tmux, ripgrep, jq, tini, build-essential, openssh
+
   Workdir:   ~/workspaces  (bind-mounted; clone repos here)
 
   Start claude:
       claude --dangerously-skip-permissions
 
-  GitHub auth (one of):
-      gh auth login                  # interactive
-      export GH_TOKEN=ghp_...        # or set GH_TOKEN in .env
+  Python, use uv for venv and package management:
+      uv venv .venv
+      uv add <package>  # adds to pyproject.toml and installs
+      uv sync           # install from pyproject.toml
 
-  Persisted via mounts: ~/.claude{,.json}, ~/.ssh, ~/.config/gh, ~/workspaces.
+  GitHub auth (one of):
+      If you did not set GH_TOKEN in .env or values.yaml:
+      gh auth login                  # interactive
+      export GH_TOKEN=ghp_...        # or set GH_TOKEN in .env / Secret
+
+  Tmux auto-start (Helm):
+      Set claude.autoStartTmux.enabled=true in values.yaml
+      Attach: tmux attach -t claude
+
+  Persisted via mounts:
+      ~/.claude{,.json}
+      ~/.ssh
+      ~/.config/gh
+      ~/workspaces
+
+  Tokens (auto-exported to shells from ENV or Secret; set in .env or Helm values):
+      GH_TOKEN, HF_TOKEN
 =========================================================================
