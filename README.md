@@ -8,7 +8,7 @@ Pre-built containerized development environment for [Claude Code](https://docs.a
 
 - [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/) (for local deployment)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) & [Helm](https://helm.sh/docs/intro/install/) (for Kubernetes deployment)
-- A Kubernetes cluster (for Helm deployment)
+- A Kubernetes cluster (for Kubernetes deployment)
 
 ## Quickstart
 
