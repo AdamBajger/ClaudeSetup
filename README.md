@@ -2,7 +2,7 @@
 
 Pre-built containerized development environment for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
 
-> **Warning:** Rootless SSH access is planned but currently untested and likely non-functional. The quickstart steps below deploy the environment without SSH.
+> **Warning:** Rootless SSH access is planned but currently untested and likely non-functional. The quickstart steps below deploy the environment with SSH half setup, you can tinker with it to get it working yourself.
 
 ## Prerequisites
 
