@@ -12,3 +12,8 @@ spec:
   {{- with .Values.persistence.storageClass }}
   storageClassName: {{ . | quote }}
   {{- end }}
+  {{- with .Values.persistence.volumeName }}
+  # Bind to a specific pre-existing PV (e.g. reuse a Retained volume from a
+  # prior release). The PV's claimRef must be cleared first so it's Available.
+  volumeName: {{ . | quote }}
+  {{- end }}

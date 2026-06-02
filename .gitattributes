@@ -1,0 +1,14 @@
+# This repo's files are baked into a Linux container image. CRLF line endings
+# break bash (`$'\r': command not found`), sshd, and shell config sourcing.
+# Force LF on checkout for everything so Windows clones don't reintroduce CRLF.
+* text=auto eol=lf
+
+# Belt-and-suspenders for the container-bound files specifically.
+*.sh        text eol=lf
+entrypoint.sh    text eol=lf
+sshd_config      text eol=lf
+bashrc           text eol=lf
+gitconfig        text eol=lf
+tmux.conf        text eol=lf
+profile-claude.sh text eol=lf
+motd             text eol=lf

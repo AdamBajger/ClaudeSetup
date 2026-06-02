@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.3.1"
+LABEL version="0.3.6"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -78,7 +78,10 @@ WORKDIR /home/claude
 # uv (Python toolchain) -> $HOME/.local/bin
 RUN curl -Ls https://astral.sh/uv/install.sh | sh
 
-# claude CLI -> $HOME/.local/bin (self-updates at runtime)
+# claude CLI -> $HOME/.local/bin (self-updates at runtime).
+# Pass --build-arg CLAUDE_CACHE_BUST=<changing value> to force a fresh fetch of
+# the latest binary without invalidating the uv/rust layers above.
+ARG CLAUDE_CACHE_BUST=0
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Rust stable toolchain -> $HOME/.cargo + $HOME/.rustup

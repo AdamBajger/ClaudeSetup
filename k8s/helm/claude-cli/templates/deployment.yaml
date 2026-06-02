@@ -48,11 +48,19 @@ spec:
                 printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > /data/claude.json
               fi
               [ -e /data/.bash_history ] || touch /data/.bash_history
-              # Bootstrap credentials.json from Secret on first start only.
-              # CLI rotates the token in place afterwards — don't clobber.
-              if [ -s /bootstrap/credentials.json ] && [ ! -e /data/claude/.credentials.json ]; then
-                cp /bootstrap/credentials.json /data/claude/.credentials.json
-                chmod 600 /data/claude/.credentials.json
+              # Bootstrap credentials.json from the Secret on first start, OR
+              # whenever the Secret's value changes (tracked via a hash marker).
+              # The CLI rotates the token in place afterwards; we hash the *seed*
+              # (not the live file), so rotated tokens are preserved across
+              # restarts and we only re-seed when values.yaml creds change.
+              if [ -s /bootstrap/credentials.json ]; then
+                newhash=$(md5sum /bootstrap/credentials.json | cut -d' ' -f1)
+                oldhash=$(cat /data/claude/.cred-bootstrap-hash 2>/dev/null || true)
+                if [ ! -e /data/claude/.credentials.json ] || [ "$newhash" != "$oldhash" ]; then
+                  cp /bootstrap/credentials.json /data/claude/.credentials.json
+                  chmod 600 /data/claude/.credentials.json
+                  printf '%s\n' "$newhash" > /data/claude/.cred-bootstrap-hash
+                fi
               fi
           securityContext:
             allowPrivilegeEscalation: false
