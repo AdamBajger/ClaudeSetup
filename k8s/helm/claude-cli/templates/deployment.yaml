@@ -26,6 +26,10 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        # Skip the recursive fsGroup chown of the whole PVC on every start —
+        # on NFS with tens of thousands of files it stalls pod init for minutes.
+        # OnRootMismatch only re-chowns when the volume root's owner/perms differ.
+        fsGroupChangePolicy: OnRootMismatch
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
@@ -110,6 +114,9 @@ spec:
             - { name: data, mountPath: /home/claude/.config/gh,   subPath: gh }
             - { name: data, mountPath: /home/claude/workspaces,   subPath: workspaces }
             - { name: data, mountPath: /home/claude/.bash_history, subPath: .bash_history }
+            {{- if .Values.shmSize }}
+            - { name: dshm, mountPath: /dev/shm }
+            {{- end }}
           resources:
             {{- $res := deepCopy .Values.resources }}
             {{- $gpuLim := include "claude-cli.gpu.limits" . | trim }}
@@ -131,6 +138,14 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "claude-cli.fullname" . }}-data
+        {{- if .Values.shmSize }}
+        # Memory-backed /dev/shm (default is 64Mi). Counts against the pod's
+        # memory limit; sizeLimit caps the tmpfs so it can't exceed it.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shmSize | quote }}
+        {{- end }}
         - name: bootstrap
           secret:
             secretName: {{ include "claude-cli.secretName" . }}
