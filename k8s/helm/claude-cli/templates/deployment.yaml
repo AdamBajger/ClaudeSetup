@@ -66,6 +66,24 @@ spec:
                   printf '%s\n' "$newhash" > /data/claude/.cred-bootstrap-hash
                 fi
               fi
+              # Seed the manager-orchestrator AGENTS.md into ~/workspaces (where
+              # the main agent runs). Re-seed when the chart's copy changes
+              # (hash marker), otherwise leave it — so in-session edits survive
+              # restarts but a new chart version still propagates.
+              if [ -s /agents/AGENTS.md ]; then
+                newhash=$(md5sum /agents/AGENTS.md | cut -d' ' -f1)
+                oldhash=$(cat /data/workspaces/.agents-md-hash 2>/dev/null || true)
+                if [ ! -e /data/workspaces/AGENTS.md ] || [ "$newhash" != "$oldhash" ]; then
+                  cp /agents/AGENTS.md /data/workspaces/AGENTS.md
+                  printf '%s\n' "$newhash" > /data/workspaces/.agents-md-hash
+                fi
+                # claude loads CLAUDE.md, NOT AGENTS.md — so wire AGENTS.md into
+                # context via a CLAUDE.md that @-imports it. Seed only if absent
+                # (don't clobber a user-authored CLAUDE.md).
+                if [ ! -e /data/workspaces/CLAUDE.md ]; then
+                  printf '@AGENTS.md\n' > /data/workspaces/CLAUDE.md
+                fi
+              fi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -73,6 +91,9 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: bootstrap, mountPath: /bootstrap, readOnly: true }
+            {{- if .Files.Get "files/AGENTS.md" }}
+            - { name: agents, mountPath: /agents, readOnly: true }
+            {{- end }}
       containers:
         - name: claude
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -154,3 +175,8 @@ spec:
                 path: credentials.json
                 mode: 0400
             optional: true   # Secret may exist without credentialsJson set
+        {{- if .Files.Get "files/AGENTS.md" }}
+        - name: agents
+          configMap:
+            name: {{ include "claude-cli.fullname" . }}-agents
+        {{- end }}

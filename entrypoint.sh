@@ -5,8 +5,10 @@
 #  3. Export GH_TOKEN / HF_TOKEN to ~/.claude-env for SSH-spawned shells.
 #  4. gh auth login if $GH_TOKEN set and not already authenticated.
 #  5. Pre-accept the workspace trust dialog for ~/workspaces in ~/.claude.json.
-#  6. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
-#  7. exec CMD (sshd -D -e by default).
+#  6. Wire node-free caveman hooks into ~/.claude/settings.json (disable the
+#     Node-based plugin) and seed the caveman skill.
+#  7. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
+#  8. exec CMD (sshd -D -e by default).
 set -eu
 
 CLAUDE_HOME=/home/claude
@@ -90,7 +92,38 @@ else
 fi
 rm -f "$tmp"
 
-# 6. Optional detached tmux session running claude. Attach via SSH:
+# 6. Node-free caveman. The upstream caveman plugin's hooks shell out to `node`,
+#    which is not installed (native claude needs no Node) — so they error on
+#    every session start / prompt. Disable the plugin and wire our vendored
+#    POSIX-sh hooks (/usr/local/lib/caveman) into settings.json instead, and
+#    seed the skill so /caveman still works. Idempotent jq merge.
+CAVE=/usr/local/lib/caveman
+SETTINGS="$CLAUDE_HOME/.claude/settings.json"
+if [ -x "$CAVE/caveman-activate.sh" ]; then
+    mkdir -p "$CLAUDE_HOME/.claude"
+    [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
+    tmp=$(mktemp)
+    if jq --arg act "$CAVE/caveman-activate.sh" --arg trk "$CAVE/caveman-tracker.sh" '
+        .enabledPlugins["caveman@caveman"] = false
+        | .hooks.SessionStart = (.hooks.SessionStart // [])
+        | .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit // [])
+        | (if any(.hooks.SessionStart[].hooks[]?; .command == $act) then .
+           else .hooks.SessionStart += [{hooks:[{type:"command",command:$act,timeout:5}]}] end)
+        | (if any(.hooks.UserPromptSubmit[].hooks[]?; .command == $trk) then .
+           else .hooks.UserPromptSubmit += [{hooks:[{type:"command",command:$trk,timeout:5}]}] end)
+        ' "$SETTINGS" > "$tmp"; then
+        cat "$tmp" > "$SETTINGS"
+        log "caveman: node-free hooks wired, node plugin disabled"
+    else
+        log "WARNING: caveman settings merge failed (jq?)"
+    fi
+    rm -f "$tmp"
+    # Seed the skill so /caveman works without the (now disabled) plugin.
+    mkdir -p "$CLAUDE_HOME/.claude/skills/caveman"
+    cp "$CAVE/SKILL.md" "$CLAUDE_HOME/.claude/skills/caveman/SKILL.md" 2>/dev/null || true
+fi
+
+# 7. Optional detached tmux session running claude. Attach via SSH:
 #      tmux attach -t "$CLAUDE_AUTOSTART_TMUX_SESSION_NAME"
 if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     TMUX_SESSION_NAME="${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
@@ -111,5 +144,5 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         || log "WARNING: tmux session start failed"
 fi
 
-# 7. Hand off to CMD.
+# 8. Hand off to CMD.
 exec "$@"

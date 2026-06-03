@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.3.6"
+LABEL version="0.3.7"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -111,10 +111,14 @@ COPY --chown=claude:claude bashrc /home/claude/.bashrc
 COPY --chown=claude:claude gitconfig /home/claude/.gitconfig
 COPY --chown=claude:claude tmux.conf /home/claude/.tmux.conf
 
+# Node-free caveman: vendored skill ruleset + POSIX-sh hooks (no Node.js).
+# Wired into ~/.claude/settings.json by the entrypoint at runtime.
+COPY --chown=root:root caveman/ /usr/local/lib/caveman/
+
 # Entrypoint script.
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0644 /etc/profile.d/claude.sh && \
-    chmod 0755 /usr/local/bin/entrypoint.sh
+    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh
 
 # ---------------------------------------------------------------------------
 # 5. Runtime metadata
