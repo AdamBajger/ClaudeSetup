@@ -1,0 +1,18 @@
+{{- if .Values.web.enabled }}
+# Web service — fronts the in-pod caddy (port 8080) for the Ingress below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "claude-cli.fullname" . }}-web
+  labels:
+    {{- include "claude-cli.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "claude-cli.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ .Values.web.port | default 8080 }}
+      targetPort: web
+      protocol: TCP
+{{- end }}

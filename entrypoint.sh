@@ -7,8 +7,9 @@
 #  5. Pre-accept the workspace trust dialog for ~/workspaces in ~/.claude.json.
 #  6. Wire node-free caveman hooks into ~/.claude/settings.json (disable the
 #     Node-based plugin) and seed the caveman skill.
-#  7. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
-#  8. exec CMD (sshd -D -e by default).
+#  7. Optionally start caddy web server ($CLAUDE_WEB_ENABLED) to share viz.
+#  8. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
+#  9. exec CMD (sshd -D -e by default).
 set -eu
 
 CLAUDE_HOME=/home/claude
@@ -123,7 +124,20 @@ if [ -x "$CAVE/caveman-activate.sh" ]; then
     cp "$CAVE/SKILL.md" "$CLAUDE_HOME/.claude/skills/caveman/SKILL.md" 2>/dev/null || true
 fi
 
-# 7. Optional detached tmux session running claude. Attach via SSH:
+# 7. Optional web server (caddy) to share HTML viz from ~/workspaces over the
+#    cluster Ingress. Gated on $CLAUDE_WEB_ENABLED. Seeds an editable Caddyfile
+#    onto the PVC and runs caddy detached in its own tmux session (port 8080).
+if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>&1; then
+    CADDYFILE="$CLAUDE_HOME/workspaces/Caddyfile"
+    [ -f "$CADDYFILE" ] || cp /usr/local/share/caddy/Caddyfile.default "$CADDYFILE" 2>/dev/null || true
+    WEB_SESSION="${CLAUDE_WEB_TMUX_SESSION_NAME:-web}"
+    log "starting caddy (tmux '$WEB_SESSION') serving $CADDYFILE on :8080"
+    tmux new-session -d -s "$WEB_SESSION" -c "$CLAUDE_HOME/workspaces" \
+        "caddy run --config '$CADDYFILE' --adapter caddyfile" \
+        || log "WARNING: caddy start failed"
+fi
+
+# 8. Optional detached tmux session running claude. Attach via SSH:
 #      tmux attach -t "$CLAUDE_AUTOSTART_TMUX_SESSION_NAME"
 if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     TMUX_SESSION_NAME="${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
@@ -144,5 +158,5 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         || log "WARNING: tmux session start failed"
 fi
 
-# 8. Hand off to CMD.
+# 9. Hand off to CMD.
 exec "$@"

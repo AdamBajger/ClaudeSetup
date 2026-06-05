@@ -48,6 +48,20 @@ resources:
 # = use the 64Mi default.
 shmSize: ""
 
+# Expose HTML visualisations from ~/workspaces over HTTPS via Ingress + an
+# in-pod caddy server (port 8080). Edit ~/workspaces/Caddyfile (persisted) to
+# add projects / reverse-proxy local ports. cert-manager issues the TLS cert.
+web:
+  enabled: false
+  host: ""                 # e.g. myapp.dyn.cloud.e-infra.cz  (REQUIRED when enabled)
+  port: 8080
+  tls: true
+  clusterIssuer: "letsencrypt-prod"   # cert-manager ClusterIssuer ("" to skip TLS)
+  ingressClassName: ""     # empty = cluster default; e.g. "nginx" / "traefik"
+  ingressAnnotations: {}
+  extraHosts: []           # additional hostnames routed to the same caddy
+  tmuxSessionName: "web"
+
 # Auto-start claude in detached tmux session. Attach: `tmux attach -t <tmuxSessionName>`.
 claude:
   autoStartTmux:

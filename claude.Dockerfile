@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.3.7"
+LABEL version="0.4.0"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -45,6 +45,14 @@ RUN apt-get update && \
     apt-get update && \
     apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
+
+# caddy — single static Go binary used to serve/reverse-proxy HTML viz from
+# ~/workspaces over the cluster Ingress (no Node/Python needed). Pinned.
+ARG CADDY_VERSION=2.8.4
+RUN curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz" \
+        | tar -xz -C /usr/local/bin caddy && \
+    chmod 0755 /usr/local/bin/caddy && \
+    /usr/local/bin/caddy version
 
 # ---------------------------------------------------------------------------
 # 2. Non-root user (rare; only invalidates if UID/GID args change)
@@ -114,6 +122,10 @@ COPY --chown=claude:claude tmux.conf /home/claude/.tmux.conf
 # Node-free caveman: vendored skill ruleset + POSIX-sh hooks (no Node.js).
 # Wired into ~/.claude/settings.json by the entrypoint at runtime.
 COPY --chown=root:root caveman/ /usr/local/lib/caveman/
+
+# Default Caddyfile for the web-exposure feature (seeded to ~/workspaces by the
+# entrypoint when web.enabled).
+COPY --chown=root:root caddy/Caddyfile.default /usr/local/share/caddy/Caddyfile.default
 
 # Entrypoint script.
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh

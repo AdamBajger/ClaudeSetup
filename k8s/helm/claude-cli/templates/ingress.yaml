@@ -1,0 +1,54 @@
+{{- if .Values.web.enabled }}
+{{- if not .Values.web.host }}{{ fail "web.enabled=true requires web.host (e.g. claude-bajger.dyn.cloud.e-infra.cz)" }}{{- end }}
+# HTTPS exposure for the in-pod caddy. cert-manager issues the TLS cert for
+# web.host via the named ClusterIssuer. The Ingress LB answers on IPv4 + IPv6.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "claude-cli.fullname" . }}-web
+  labels:
+    {{- include "claude-cli.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.web.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.web.ingressAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.web.ingressClassName }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.web.tls }}
+  tls:
+    - hosts:
+        - {{ .Values.web.host | quote }}
+        {{- range .Values.web.extraHosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ include "claude-cli.fullname" . }}-web-tls
+  {{- end }}
+  rules:
+    - host: {{ .Values.web.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "claude-cli.fullname" . }}-web
+                port:
+                  number: {{ .Values.web.port | default 8080 }}
+    {{- range .Values.web.extraHosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "claude-cli.fullname" $ }}-web
+                port:
+                  number: {{ $.Values.web.port | default 8080 }}
+    {{- end }}
+{{- end }}

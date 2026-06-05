@@ -1,0 +1,32 @@
+# Default caddy config for sharing HTML visualisations from ~/workspaces.
+# This file is seeded onto the PVC (~/workspaces/Caddyfile) on first start and
+# is yours to edit — it persists across pod restarts. After editing, reload:
+#   tmux send-keys -t web C-c     # or: caddy reload --config ~/workspaces/Caddyfile
+#
+# caddy listens on :8080 (plain HTTP). TLS is terminated by the cluster Ingress,
+# so no certs here. Reachable at https://<web.host> once web.enabled=true.
+
+:8080 {
+	# Default landing: browse the workspaces tree as static files.
+	root * /home/claude/workspaces
+	file_server browse
+
+	# --- Per-project routes (uncomment + adjust) ------------------------------
+	# Reverse-proxy a project's running dev server on a local port:
+	#   handle_path /viz-a/* {
+	#       reverse_proxy localhost:8501
+	#   }
+	#
+	# Serve a project's static build under a subpath:
+	#   handle_path /viz-b/* {
+	#       root * /home/claude/workspaces/projB/public
+	#       file_server
+	#   }
+	#
+	# NOTE: apps with absolute asset paths (/static/...) break under a subpath.
+	# For those, give the project its own hostname via web.extraHosts in values
+	# and a dedicated site block here:
+	#   viz-c.example.dyn.cloud.e-infra.cz {
+	#       reverse_proxy localhost:8888
+	#   }
+}

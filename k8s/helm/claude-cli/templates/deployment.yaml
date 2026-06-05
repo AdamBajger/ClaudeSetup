@@ -104,6 +104,9 @@ spec:
               drop: [ALL]
           ports:
             - { name: ssh, containerPort: 2222, protocol: TCP }
+            {{- if .Values.web.enabled }}
+            - { name: web, containerPort: {{ .Values.web.port | default 8080 }}, protocol: TCP }
+            {{- end }}
           env:
             - name: AUTHORIZED_KEYS
               valueFrom:
@@ -127,6 +130,12 @@ spec:
               value: {{ .Values.claude.autoStartTmux.tmuxSessionName | quote }}
             - name: CLAUDE_AUTOSTART_CLAUDE_COMMAND
               value: {{ .Values.claude.autoStartTmux.claudeCommand | quote }}
+            {{- end }}
+            {{- if .Values.web.enabled }}
+            - name: CLAUDE_WEB_ENABLED
+              value: "true"
+            - name: CLAUDE_WEB_TMUX_SESSION_NAME
+              value: {{ .Values.web.tmuxSessionName | default "web" | quote }}
             {{- end }}
           volumeMounts:
             - { name: data, mountPath: /home/claude/.claude.json, subPath: claude.json }
