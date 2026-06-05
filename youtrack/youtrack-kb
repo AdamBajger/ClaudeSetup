@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# youtrack-kb — file-based YouTrack knowledgebase (articles) helper.
+#
+# Articles are NOT exposed by the YouTrack MCP; this wraps the REST API so an
+# agent can download an article to a markdown file, edit it with normal tools,
+# and upload it back. Reads YT_HOST + YT_TOKEN from the environment (the same
+# values the issues MCP is configured from).
+#
+#   youtrack-kb get    <idReadable> [file]                     download content -> file (default <idReadable>.md)
+#   youtrack-kb update <idReadable> <file>                     upload file as the article's markdown content
+#   youtrack-kb create <projectShortName> <summary> <file>     create a new article from file
+#   youtrack-kb delete <idReadable>                            delete the article
+#   youtrack-kb list   [projectShortName]                      list idReadable + summary
+#
+# idReadable is the human id like ON-A-80; the helper resolves YouTrack's
+# internal ids itself so you never juggle them.
+set -euo pipefail
+
+: "${YT_HOST:?set YT_HOST (e.g. https://youtrack.example.com)}"
+: "${YT_TOKEN:?set YT_TOKEN (YouTrack permanent token perm-...)}"
+HOST="${YT_HOST%/}"
+AUTH=(-H "Authorization: Bearer $YT_TOKEN" -H "Accept: application/json")
+
+api() { curl -sS --fail-with-body "${AUTH[@]}" "$@"; }
+resolve_id() { api "$HOST/api/articles/$1?fields=id" | jq -r '.id'; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  get)
+    id="${1:?usage: youtrack-kb get <idReadable> [file]}"; out="${2:-$id.md}"
+    resp=$(api "$HOST/api/articles/$id?fields=id,idReadable,summary,content,project(shortName,name)")
+    printf '%s' "$resp" | jq -r '.content // ""' > "$out"
+    printf 'id=%s idReadable=%s summary=%q -> %s\n' \
+      "$(printf '%s' "$resp" | jq -r '.id')" \
+      "$(printf '%s' "$resp" | jq -r '.idReadable')" \
+      "$(printf '%s' "$resp" | jq -r '.summary')" "$out" >&2 ;;
+  update)
+    id="${1:?usage: youtrack-kb update <idReadable> <file>}"; file="${2:?need file}"
+    [ -f "$file" ] || { echo "no such file: $file" >&2; exit 1; }
+    iid=$(resolve_id "$id")
+    body=$(jq -Rs '{content: .}' < "$file")
+    api -X POST -H 'Content-Type: application/json' \
+      -d "$body" "$HOST/api/articles/$iid?fields=idReadable,summary,updated" \
+      | jq -r '"updated \(.idReadable): \(.summary)"' ;;
+  create)
+    proj="${1:?usage: youtrack-kb create <projectShortName> <summary> <file>}"; summary="${2:?need summary}"; file="${3:?need file}"
+    [ -f "$file" ] || { echo "no such file: $file" >&2; exit 1; }
+    pid=$(api "$HOST/api/admin/projects?fields=id,shortName" | jq -r --arg s "$proj" '.[] | select(.shortName==$s) | .id')
+    [ -n "$pid" ] || { echo "no project with shortName $proj" >&2; exit 1; }
+    body=$(jq -Rs --arg s "$summary" --arg p "$pid" '{summary:$s, content:., project:{id:$p}}' < "$file")
+    api -X POST -H 'Content-Type: application/json' \
+      -d "$body" "$HOST/api/articles?fields=idReadable,summary" \
+      | jq -r '"created \(.idReadable): \(.summary)"' ;;
+  delete)
+    id="${1:?usage: youtrack-kb delete <idReadable>}"
+    iid=$(resolve_id "$id")
+    api -X DELETE "$HOST/api/articles/$iid" >/dev/null
+    echo "deleted $id" ;;
+  list)
+    proj="${1:-}"
+    if [ -n "$proj" ]; then
+      api "$HOST/api/articles?fields=idReadable,summary,project(shortName)&\$top=500" \
+        | jq -r --arg s "$proj" '.[] | select(.project.shortName==$s) | "\(.idReadable)\t\(.summary)"'
+    else
+      api "$HOST/api/articles?fields=idReadable,summary&\$top=500" \
+        | jq -r '.[] | "\(.idReadable)\t\(.summary)"'
+    fi ;;
+  ""|-h|--help|help)
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "unknown command: $cmd (try: youtrack-kb help)" >&2; exit 2 ;;
+esac

@@ -6,10 +6,12 @@
 #
 # Mode resolution: persisted flag file > $CAVEMAN_DEFAULT_MODE > 'full'.
 
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 FLAG="$CLAUDE_DIR/.caveman-active"
-SKILL="$DIR/SKILL.md"
+# Ruleset source: the baked caveman skill (single source for Docker + k8s),
+# falling back to the seeded user-skill copy if present.
+SKILL=/usr/local/share/claude-skills/caveman/SKILL.md
+[ -f "$SKILL" ] || SKILL="$CLAUDE_DIR/skills/caveman/SKILL.md"
 VALID=" off lite full ultra wenyan-lite wenyan wenyan-full wenyan-ultra "
 
 mode=""

@@ -1,32 +1,27 @@
-# Default caddy config for sharing HTML visualisations from ~/workspaces.
-# This file is seeded onto the PVC (~/workspaces/Caddyfile) on first start and
-# is yours to edit — it persists across pod restarts. After editing, reload:
-#   tmux send-keys -t web C-c     # or: caddy reload --config ~/workspaces/Caddyfile
+# MANAGED FILE — the entrypoint overwrites this on every pod start. Do NOT edit
+# it directly (changes are lost). Customise via the two mechanisms below.
 #
-# caddy listens on :8080 (plain HTTP). TLS is terminated by the cluster Ingress,
-# so no certs here. Reachable at https://<web.host> once web.enabled=true.
+# Only content you explicitly register is exposed; the rest of ~/workspaces is
+# NOT served.
+#
+#   Publish static HTML/assets:
+#       webshare add <name> <dir>     ->  https://<host>/<name>/
+#       webshare rm <name>            (unpublish)        webshare list
+#     (`webshare` symlinks <dir> into ~/workspaces/.public/. Whatever is INSIDE a
+#      published dir becomes public — only publish dirs of public-safe files.)
+#
+#   Proxy a live app / custom routing:
+#       drop a snippet in ~/workspaces/caddy.d/<anything>.caddy, e.g.
+#         handle_path /myapp/* { reverse_proxy localhost:8501 }
+#
+# caddy listens on :8080 (plain HTTP); TLS is terminated by the cluster Ingress.
 
 :8080 {
-	# Default landing: browse the workspaces tree as static files.
-	root * /home/claude/workspaces
+	# Serve ONLY the registered public locations (symlinks under .public).
+	root * /home/claude/workspaces/.public
 	file_server browse
 
-	# --- Per-project routes (uncomment + adjust) ------------------------------
-	# Reverse-proxy a project's running dev server on a local port:
-	#   handle_path /viz-a/* {
-	#       reverse_proxy localhost:8501
-	#   }
-	#
-	# Serve a project's static build under a subpath:
-	#   handle_path /viz-b/* {
-	#       root * /home/claude/workspaces/projB/public
-	#       file_server
-	#   }
-	#
-	# NOTE: apps with absolute asset paths (/static/...) break under a subpath.
-	# For those, give the project its own hostname via web.extraHosts in values
-	# and a dedicated site block here:
-	#   viz-c.example.dyn.cloud.e-infra.cz {
-	#       reverse_proxy localhost:8888
-	#   }
+	# Optional user-supplied route snippets (reverse_proxy, extra file_servers).
+	# A glob that matches nothing is a no-op, so this is safe when the dir is empty.
+	import /home/claude/workspaces/caddy.d/*.caddy
 }

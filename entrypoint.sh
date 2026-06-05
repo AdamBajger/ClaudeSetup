@@ -5,11 +5,14 @@
 #  3. Export GH_TOKEN / HF_TOKEN to ~/.claude-env for SSH-spawned shells.
 #  4. gh auth login if $GH_TOKEN set and not already authenticated.
 #  5. Pre-accept the workspace trust dialog for ~/workspaces in ~/.claude.json.
-#  6. Wire node-free caveman hooks into ~/.claude/settings.json (disable the
-#     Node-based plugin) and seed the caveman skill.
-#  7. Optionally start caddy web server ($CLAUDE_WEB_ENABLED) to share viz.
-#  8. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
-#  9. exec CMD (sshd -D -e by default).
+#  6. Seed agent skills + orchestrator AGENTS.md from the image (single source
+#     for docker compose and k8s).
+#  7. Wire node-free caveman hooks into ~/.claude/settings.json (disable plugin).
+#  8. Configure optional integrations: YouTrack MCP (if host+token) and the Slack
+#     channel-monitoring tools + cron-reminder hook.
+#  9. Optionally start caddy web server ($CLAUDE_WEB_ENABLED) to share viz.
+# 10. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
+# 11. exec CMD (sshd -D -e by default).
 set -eu
 
 CLAUDE_HOME=/home/claude
@@ -93,11 +96,36 @@ else
 fi
 rm -f "$tmp"
 
-# 6. Node-free caveman. The upstream caveman plugin's hooks shell out to `node`,
+# 6. Seed agent skills + the orchestrator AGENTS.md from the image. Baking these
+#    (rather than k8s ConfigMaps) keeps ONE source for both docker compose and
+#    k8s. Add a skill = drop a dir under skills/ in the repo.
+#    - Skills: overwrite every start (image is source of truth). User-authored
+#      skills under other names in ~/.claude/skills are left untouched.
+#    - AGENTS.md: seed only if absent (the manager edits it in-session; don't
+#      clobber). Pair it with a CLAUDE.md that @-imports it — claude loads
+#      CLAUDE.md, not AGENTS.md.
+SKILLSRC=/usr/local/share/claude-skills
+if [ -d "$SKILLSRC" ]; then
+    mkdir -p "$CLAUDE_HOME/.claude/skills"
+    for d in "$SKILLSRC"/*/; do
+        [ -d "$d" ] || continue
+        name=$(basename "$d")
+        rm -rf "$CLAUDE_HOME/.claude/skills/$name"
+        cp -r "$d" "$CLAUDE_HOME/.claude/skills/$name"
+    done
+    log "seeded skills: $(ls "$SKILLSRC" 2>/dev/null | tr '\n' ' ')"
+fi
+if [ -f /usr/local/share/claude/AGENTS.md ]; then
+    mkdir -p "$CLAUDE_HOME/workspaces"
+    [ -e "$CLAUDE_HOME/workspaces/AGENTS.md" ] || cp /usr/local/share/claude/AGENTS.md "$CLAUDE_HOME/workspaces/AGENTS.md"
+    [ -e "$CLAUDE_HOME/workspaces/CLAUDE.md" ] || printf '@AGENTS.md\n' > "$CLAUDE_HOME/workspaces/CLAUDE.md"
+fi
+
+# 7. Node-free caveman. The upstream caveman plugin's hooks shell out to `node`,
 #    which is not installed (native claude needs no Node) — so they error on
 #    every session start / prompt. Disable the plugin and wire our vendored
-#    POSIX-sh hooks (/usr/local/lib/caveman) into settings.json instead, and
-#    seed the skill so /caveman still works. Idempotent jq merge.
+#    POSIX-sh hooks (/usr/local/lib/caveman) into settings.json instead. The
+#    /caveman skill itself is seeded by the generic loop in step 6.
 CAVE=/usr/local/lib/caveman
 SETTINGS="$CLAUDE_HOME/.claude/settings.json"
 if [ -x "$CAVE/caveman-activate.sh" ]; then
@@ -119,25 +147,67 @@ if [ -x "$CAVE/caveman-activate.sh" ]; then
         log "WARNING: caveman settings merge failed (jq?)"
     fi
     rm -f "$tmp"
-    # Seed the skill so /caveman works without the (now disabled) plugin.
-    mkdir -p "$CLAUDE_HOME/.claude/skills/caveman"
-    cp "$CAVE/SKILL.md" "$CLAUDE_HOME/.claude/skills/caveman/SKILL.md" 2>/dev/null || true
 fi
 
-# 7. Optional web server (caddy) to share HTML viz from ~/workspaces over the
-#    cluster Ingress. Gated on $CLAUDE_WEB_ENABLED. Seeds an editable Caddyfile
-#    onto the PVC and runs caddy detached in its own tmux session (port 8080).
+# 8. Optional MCP servers + integrations. Sessions load MCP tools on start, so
+#    configuring here (before the autostart claude) is enough — no restart needed.
+
+# 8a. YouTrack MCP — only if both host and token are provided. Re-add idempotently.
+if [ -n "${YT_HOST:-}" ] && [ -n "${YT_TOKEN:-}" ]; then
+    claude mcp remove -s user youtrack >/dev/null 2>&1 || true
+    if claude mcp add -s user -t http youtrack "${YT_HOST%/}/mcp" \
+            -H "Authorization: Bearer $YT_TOKEN" >/dev/null 2>&1; then
+        log "youtrack MCP configured (${YT_HOST%/})"
+    else
+        log "WARNING: youtrack mcp add failed"
+    fi
+fi
+
+# 8b. Slack channel-monitoring tooling (always installed — harmless when unused).
+#     The Slack MCP itself is an account-level claude.ai connector (cannot be
+#     baked). The enable-slack-channel-monitoring skill is the real toggle; this
+#     just installs the generic tools + the manager-only cron-reminder hook,
+#     which is registry-driven and stays silent until a monitor is registered.
+SLACKLIB=/usr/local/lib/slack-monitor
+if [ -d "$SLACKLIB" ]; then
+    mkdir -p "$CLAUDE_HOME/workspaces/bin"
+    cp "$SLACKLIB/slack-lock" "$CLAUDE_HOME/workspaces/bin/slack-lock" 2>/dev/null || true
+    cp "$SLACKLIB/slack-cron-reminder.sh" "$CLAUDE_HOME/workspaces/bin/_slack-cron-reminder.sh" 2>/dev/null || true
+    chmod 0755 "$CLAUDE_HOME/workspaces/bin/slack-lock" "$CLAUDE_HOME/workspaces/bin/_slack-cron-reminder.sh" 2>/dev/null || true
+    # Install the manager-only cron-reminder as a SessionStart hook (idempotent).
+    REMINDER="$CLAUDE_HOME/workspaces/bin/_slack-cron-reminder.sh"
+    [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
+    tmp=$(mktemp)
+    if jq --arg cmd "$REMINDER" '
+        .hooks.SessionStart = (.hooks.SessionStart // [])
+        | (if any(.hooks.SessionStart[].hooks[]?; .command == $cmd) then .
+           else .hooks.SessionStart += [{hooks:[{type:"command",command:$cmd,timeout:5}]}] end)
+        ' "$SETTINGS" > "$tmp"; then
+        cat "$tmp" > "$SETTINGS"
+        log "slack monitor: tools + cron-reminder hook installed"
+    else
+        log "WARNING: slack cron-reminder hook merge failed (jq?)"
+    fi
+    rm -f "$tmp"
+fi
+
+# 9. Optional web server (caddy) to share HTML from ~/workspaces over the cluster
+#    Ingress. Gated on $CLAUDE_WEB_ENABLED. caddy serves ONLY ~/workspaces/.public
+#    (symlinks managed by `webshare`) + optional ~/workspaces/caddy.d/*.caddy
+#    snippets — never the whole tree. The Caddyfile is managed (overwritten each
+#    start); publish via `webshare add <name> <dir>`, not by editing it.
 if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>&1; then
     CADDYFILE="$CLAUDE_HOME/workspaces/Caddyfile"
-    [ -f "$CADDYFILE" ] || cp /usr/local/share/caddy/Caddyfile.default "$CADDYFILE" 2>/dev/null || true
+    mkdir -p "$CLAUDE_HOME/workspaces/.public" "$CLAUDE_HOME/workspaces/caddy.d"
+    cp /usr/local/share/caddy/Caddyfile.default "$CADDYFILE" 2>/dev/null || true
     WEB_SESSION="${CLAUDE_WEB_TMUX_SESSION_NAME:-web}"
-    log "starting caddy (tmux '$WEB_SESSION') serving $CADDYFILE on :8080"
+    log "starting caddy (tmux '$WEB_SESSION') on :8080 (serving ~/workspaces/.public)"
     tmux new-session -d -s "$WEB_SESSION" -c "$CLAUDE_HOME/workspaces" \
         "caddy run --config '$CADDYFILE' --adapter caddyfile" \
         || log "WARNING: caddy start failed"
 fi
 
-# 8. Optional detached tmux session running claude. Attach via SSH:
+# 10. Optional detached tmux session running claude. Attach via SSH:
 #      tmux attach -t "$CLAUDE_AUTOSTART_TMUX_SESSION_NAME"
 if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     TMUX_SESSION_NAME="${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
@@ -158,5 +228,5 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         || log "WARNING: tmux session start failed"
 fi
 
-# 9. Hand off to CMD.
+# 11. Hand off to CMD.
 exec "$@"

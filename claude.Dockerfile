@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.4.0"
+LABEL version="0.6.0"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -119,18 +119,37 @@ COPY --chown=claude:claude bashrc /home/claude/.bashrc
 COPY --chown=claude:claude gitconfig /home/claude/.gitconfig
 COPY --chown=claude:claude tmux.conf /home/claude/.tmux.conf
 
-# Node-free caveman: vendored skill ruleset + POSIX-sh hooks (no Node.js).
-# Wired into ~/.claude/settings.json by the entrypoint at runtime.
+# Agent skills (markdown + templates), one dir per skill. The entrypoint seeds
+# every dir here to ~/.claude/skills/<name> on start (overwrite). Add a skill =
+# drop a dir under skills/ in the repo. Single source for Docker and k8s.
+COPY --chown=root:root skills/ /usr/local/share/claude-skills/
+
+# Manager-orchestrator AGENTS.md, baked so BOTH docker compose and k8s get it
+# (entrypoint seeds it to ~/workspaces + a CLAUDE.md that @-imports it).
+COPY --chown=root:root k8s/helm/claude-cli/files/AGENTS.md /usr/local/share/claude/AGENTS.md
+
+# Node-free caveman: POSIX-sh hooks (no Node.js). The ruleset SKILL.md lives in
+# skills/caveman/ (baked above) and is read from there by caveman-activate.sh.
 COPY --chown=root:root caveman/ /usr/local/lib/caveman/
 
-# Default Caddyfile for the web-exposure feature (seeded to ~/workspaces by the
-# entrypoint when web.enabled).
+# Default Caddyfile + the `webshare` helper for the web-exposure feature. caddy
+# serves only ~/workspaces/.public (symlinks managed by `webshare`); the
+# entrypoint refreshes the Caddyfile each start (web.enabled).
 COPY --chown=root:root caddy/Caddyfile.default /usr/local/share/caddy/Caddyfile.default
+COPY --chown=root:root caddy/webshare /usr/local/bin/webshare
+
+# Slack channel-monitoring executables (the skill + templates live in skills/).
+COPY --chown=root:root slack-monitor/ /usr/local/lib/slack-monitor/
+
+# YouTrack knowledgebase (articles) REST helper — issues go through the MCP.
+COPY --chown=root:root youtrack/youtrack-kb /usr/local/bin/youtrack-kb
 
 # Entrypoint script.
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0644 /etc/profile.d/claude.sh && \
-    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh
+    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/youtrack-kb \
+        /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh \
+        /usr/local/lib/slack-monitor/slack-lock /usr/local/lib/slack-monitor/slack-cron-reminder.sh
 
 # ---------------------------------------------------------------------------
 # 5. Runtime metadata

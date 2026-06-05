@@ -30,6 +30,7 @@ auth:
     {"copy your full":".claude/.credentials.json content here"}}
   ghToken: "gho_op..."           # optional GH_TOKEN
   hfToken: "hf_..."              # optional HF_TOKEN (HuggingFace)
+  ytToken: ""                    # optional YouTrack permanent token (perm-...); pair with youtrack.host
 
 service:
   type: ClusterIP       # LoadBalancer | NodePort | ClusterIP
@@ -53,7 +54,7 @@ shmSize: ""
 # add projects / reverse-proxy local ports. cert-manager issues the TLS cert.
 web:
   enabled: false
-  host: ""                 # e.g. myapp.dyn.cloud.e-infra.cz  (REQUIRED when enabled)
+  host: "bajger.dyn.cloud.e-infra.cz"                 # e.g. myapp.dyn.cloud.e-infra.cz  (REQUIRED when enabled)
   port: 8080
   tls: true
   clusterIssuer: "letsencrypt-prod"   # cert-manager ClusterIssuer ("" to skip TLS)
@@ -61,6 +62,15 @@ web:
   ingressAnnotations: {}
   extraHosts: []           # additional hostnames routed to the same caddy
   tmuxSessionName: "web"
+
+# --- Plugin-like integrations -------------------------------------------------
+# YouTrack MCP — configured only if BOTH youtrack.host and auth.ytToken are set.
+youtrack:
+  host: ""                 # e.g. https://youtrack.yourco.com  ("" = disabled)
+
+# Slack: MCP is an account-level claude.ai connector (enable on the account).
+# The slack-monitor tools + enable-slack-channel-monitoring skill are always
+# baked + installed (inert until you run the skill) — no toggle needed.
 
 # Auto-start claude in detached tmux session. Attach: `tmux attach -t <tmuxSessionName>`.
 claude:

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# webshare — register directories to expose publicly via the caddy web server.
+# Creates/removes symlinks under ~/workspaces/.public; caddy serves ONLY that
+# directory, so nothing else in ~/workspaces is exposed. Whatever is INSIDE a
+# published dir becomes public — only publish dirs that hold public-safe files.
+#
+#   webshare add <name> <dir>   publish <dir> at https://<host>/<name>/
+#   webshare rm  <name>         unpublish
+#   webshare list               show published locations
+PUB="/home/claude/workspaces/.public"
+mkdir -p "$PUB"
+case "$1" in
+  add)
+    name="$2"; dir="$3"
+    [ -n "$name" ] && [ -n "$dir" ] || { echo "usage: webshare add <name> <dir>" >&2; exit 2; }
+    dir=$(readlink -f "$dir" 2>/dev/null) || { echo "no such dir: $3" >&2; exit 1; }
+    [ -d "$dir" ] || { echo "not a directory: $dir" >&2; exit 1; }
+    ln -sfn "$dir" "$PUB/$name"
+    echo "published: /$name/ -> $dir" ;;
+  rm|remove)
+    name="$2"; [ -n "$name" ] || { echo "usage: webshare rm <name>" >&2; exit 2; }
+    rm -f "$PUB/$name"; echo "unpublished: /$name/" ;;
+  list|ls|"")
+    if [ -n "$(ls -A "$PUB" 2>/dev/null)" ]; then ls -l "$PUB" | grep -v '^total'; else echo "(nothing published)"; fi ;;
+  *) echo "usage: webshare add <name> <dir> | rm <name> | list" >&2; exit 2 ;;
+esac

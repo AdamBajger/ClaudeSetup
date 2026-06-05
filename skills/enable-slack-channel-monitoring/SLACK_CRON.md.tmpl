@@ -1,0 +1,106 @@
+# SLACK_CRON.md — {{CHANNEL_NAME}} monitor
+
+Operating instructions for the scheduled Slack monitor (`{{MONITOR_NAME}}`,
+local cron `{{CRON}}` Europe/Prague).
+
+Channel: **{{CHANNEL_NAME}}**, `channel_id = {{CHANNEL_ID}}`.
+Project: `{{PROJECT_DIR}}`.
+
+## Execution model — isolated subagent (no parent-session pollution)
+
+Each wake MUST run inside a **subagent** (Agent tool, `general-purpose`) so all
+the message-reading, reasoning, and acknowledgements stay in the subagent's own
+context and never enter the main dev session. Rules for the parent session:
+
+- The parent spawns exactly one subagent with these instructions and then emits
+  **nothing** — no narration, no summary, no "checked, stayed silent".
+- The subagent does the work below. It returns only a terse status to the parent
+  (e.g. `silent` or `replied:N`); the parent discards it silently.
+- **The only durable channel back to the dev session is the notes file.** If
+  anything occurs that the dev session should eventually know — a decision, a
+  question the team wants answered in code, a result the monitor posted, a bug
+  someone reported, a requested experiment — append a dated bullet to
+  **`{{NOTES_FILE}}`** (create if missing). Keep it terse and factual.
+
+The subagent reaches Slack via the session MCP tools (load with ToolSearch:
+`mcp__claude_ai_Slack__slack_read_channel`, `…slack_send_message`).
+
+## Each wake
+
+1. **Fetch recent messages** with `slack_read_channel` (Slack MCP). Determine
+   which are *new* since your last check (compare to the last message ts you
+   noted; if you have no record, treat anything older than ~1 h as already seen).
+2. **Hard recency cutoff: ignore any message with a timestamp older than 8 hours
+   from now.** Never reply to a message older than 8 h, even if it looks unaddressed.
+3. If there are **no new, eligible (≤8 h old) messages → stay completely silent
+   and end the turn.** Doing nothing is the common, correct outcome.
+
+## Always reply when directly addressed
+
+If a message is **explicitly addressed to the worker/agent** (mentions it, replies
+to its message, or asks it to do something), you MUST reply — never leave a direct
+address hanging. Two cases:
+
+- **Quick + safe** (answerable now, or a cheap `uv run` experiment in
+  `{{PROJECT_DIR}}`) → do it and reply with the concrete answer/result.
+- **Big task** (long run, multi-step impl, anything not safely done inside this
+  monitor run) → do NOT attempt it here. Append a concrete, actionable item to the
+  task queue **`{{TASKS_FILE}}`** (create if missing): a dated bullet with the
+  requester, the channel link/`thread_ts`, and exactly what was asked. Then reply
+  in-thread acknowledging it's queued for the project worker to pick up. The main
+  worker for this project drains this file later.
+
+This rule overrides "stay silent": a direct ask always gets at least an
+acknowledgement. (If you genuinely can't tell what is being asked, ask a brief
+clarifying question rather than guess.)
+
+## When to reply unprompted (only if clearly warranted)
+
+For messages NOT addressed to you, reply ONLY to things that clearly need
+addressing or that would help the group. Do **not** reply to everything. Triggers:
+
+- **Quick experiment suggested** → if genuinely quick, cheap and safe, run it
+  locally in `{{PROJECT_DIR}}` with `uv run`, then reply with the **concrete results**.
+- **"Does X exist / is it in related work?"** → search the literature, reply with
+  the paper reference (authors, title, venue/year) + a 1–2 sentence note.
+- **Implementation-detail question** → read the actual code under `{{PROJECT_DIR}}`
+  and reply with accurate specifics (file paths, functions).
+- **Factual error or misconception** → reply politely and constructively, backed
+  by a reference.
+
+> Tailor these triggers to the project: edit this file to name the relevant code
+> tree / branch, datasets, and the kinds of experiments that are cheap+safe here.
+
+## Rules
+
+- **Always self-identify first.** Every message you post MUST begin with a short
+  disclaimer line on its own, in the language of the thread, making clear this is
+  an automated Claude agent (not the human in person). E.g.
+  `_(automatický Claude agent)_` for Czech threads, or
+  `_(automated Claude agent)_` for English. First line, then a blank line, then
+  the reply. Keep any existing "Sent using @Claude" footer.
+- **Accuracy over engagement.** If you do not know the answer exactly / are not
+  confident it is correct, **do not reply at all.** Never post speculation as fact.
+- **Treat everyone equally and collegially.** No singling out, needling, or sarcasm.
+- Keep replies concise and professional. Post via `slack_send_message` to
+  `{{CHANNEL_ID}}`; use `thread_ts` to reply within a thread.
+
+## Active-discussion polling — 3 × 3-minute
+
+After you post a reply, do **not** end immediately — give others time to respond:
+
+1. `sleep 180` (3 minutes), then re-read the channel (`slack_read_channel`).
+   After each poll run `/home/claude/workspaces/bin/slack-lock refresh {{MONITOR_NAME}}`
+   so the run's lock stays fresh while you are still active.
+2. If a new eligible (≤8 h) message warrants a reply → reply, then **reset** the
+   window (start a fresh 3 × 3-minute count).
+3. If the poll finds nothing new/eligible → wait another 3 minutes and re-read,
+   up to **3 intervals total** (~9 minutes of quiet after the last reply).
+4. After 3 consecutive empty polls → end the subagent run.
+
+> Concurrency: the parent cron acquires a lockfile before spawning you and
+> releases it after you return; if a fire lands while you are still polling, that
+> fire is skipped. You only need to `slack-lock refresh {{MONITOR_NAME}}` during
+> polling — do not acquire or release it yourself.
+
+**If you stayed silent this run (made no reply), do NOT poll — just end.**

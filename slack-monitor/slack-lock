@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Mutual-exclusion lock for a Slack monitor run. Supports one lock per monitor
+# (pass the monitor name as $2) so multiple channel monitors don't collide.
+#
+#   slack-lock acquire [name]  -> exit 0 + ACQUIRED if free (or stale); exit 1 + LOCKED if held
+#   slack-lock refresh [name]  -> bump mtime (call periodically inside a live run)
+#   slack-lock release [name]  -> remove the lock
+#
+# name defaults to "default" for backward compatibility.
+NAME="${2:-default}"
+LOCK="/home/claude/workspaces/.slack_monitor.${NAME}.lock"
+TTL=1800   # seconds; a lock older than this is considered stale (crashed run) and may be taken
+now=$(date +%s)
+case "$1" in
+  acquire)
+    if [ -f "$LOCK" ]; then
+      age=$(( now - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) ))
+      if [ "$age" -lt "$TTL" ]; then echo "LOCKED age=${age}s"; exit 1; fi
+      echo "(stale lock age=${age}s, taking over)"
+    fi
+    echo "$now" > "$LOCK"; echo "ACQUIRED"; exit 0 ;;
+  refresh) [ -f "$LOCK" ] && touch "$LOCK"; exit 0 ;;
+  release) rm -f "$LOCK"; echo "RELEASED"; exit 0 ;;
+  *) echo "usage: slack-lock acquire|refresh|release [monitor-name]" >&2; exit 2 ;;
+esac
