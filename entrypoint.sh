@@ -12,7 +12,8 @@
 #     channel-monitoring tools + cron-reminder hook.
 #  9. Optionally start caddy web server ($CLAUDE_WEB_ENABLED) to share viz.
 # 10. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
-# 11. exec CMD (sshd -D -e by default).
+# 11. Auto-resume registered workers from the registry (background).
+# 12. exec CMD (sshd -D -e by default).
 set -eu
 
 CLAUDE_HOME=/home/claude
@@ -229,5 +230,25 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         || log "WARNING: tmux session start failed"
 fi
 
-# 11. Hand off to CMD.
+# 11. Auto-resume registered workers (no manager tokens needed). Each worker
+#     resumes its saved conversation via the resume-worker helper, then gets a
+#     short, generic "continue only if you were interrupted" nudge pasted in via
+#     tell-worker. Backgrounded (setsid) so it never delays sshd readiness;
+#     network was already confirmed ready in step 10.
+REG="$CLAUDE_HOME/workspaces/.workers.json"
+RESUME_HELPER="$CLAUDE_HOME/workspaces/bin/resume-worker"
+if [ -s "$REG" ] && [ -x "$RESUME_HELPER" ] && command -v jq >/dev/null 2>&1; then
+    log "auto-resuming workers from registry (background)"
+    setsid sh -c '
+        reg="$1"; rh="$2"; th="$3"; pf="$4"
+        msg=$(cat "$pf" 2>/dev/null)
+        for w in $(jq -r "keys[]" "$reg" 2>/dev/null); do
+            "$rh" "$w" >/dev/null 2>&1 || continue
+            [ -n "$msg" ] && [ -x "$th" ] && "$th" "$w" "$msg" >/dev/null 2>&1 || true
+        done
+    ' _ "$REG" "$RESUME_HELPER" "$CLAUDE_HOME/workspaces/bin/tell-worker" \
+        /usr/local/share/claude/worker-resume.prompt </dev/null >/dev/null 2>&1 &
+fi
+
+# 12. Hand off to CMD.
 exec "$@"

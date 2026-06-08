@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.6.1"
+LABEL version="0.6.2"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -77,7 +77,7 @@ RUN groupadd -g ${GID} claude && \
 # the user's $HOME and stay owned by the user that will use them at runtime.
 USER claude
 ENV HOME=/home/claude \
-    PATH="/home/claude/.local/bin:/home/claude/.cargo/bin:${PATH}" \
+    PATH="/home/claude/.local/bin:/home/claude/.cargo/bin:/home/claude/workspaces/bin:${PATH}" \
     USE_BUILTIN_RIPGREP=0 \
     RUSTUP_HOME=/home/claude/.rustup \
     CARGO_HOME=/home/claude/.cargo
@@ -143,6 +143,9 @@ COPY --chown=root:root slack-monitor/ /usr/local/lib/slack-monitor/
 
 # YouTrack knowledgebase (articles) REST helper — issues go through the MCP.
 COPY --chown=root:root youtrack/youtrack-kb /usr/local/bin/youtrack-kb
+
+# Generic prompt pasted to each worker on entrypoint auto-resume after a restart.
+COPY --chown=root:root worker-resume.prompt /usr/local/share/claude/worker-resume.prompt
 
 # Entrypoint script.
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
