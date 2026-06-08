@@ -61,7 +61,6 @@ web:
   ingressClassName: ""     # empty = cluster default; e.g. "nginx" / "traefik"
   ingressAnnotations: {}
   extraHosts: []           # additional hostnames routed to the same caddy
-  tmuxSessionName: "web"
 
 # --- Plugin-like integrations -------------------------------------------------
 # YouTrack MCP — configured only if BOTH youtrack.host and auth.ytToken are set.

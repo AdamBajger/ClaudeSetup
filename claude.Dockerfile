@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.6.0"
+LABEL version="0.6.1"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files

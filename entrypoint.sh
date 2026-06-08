@@ -198,13 +198,14 @@ fi
 #    start); publish via `webshare add <name> <dir>`, not by editing it.
 if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>&1; then
     CADDYFILE="$CLAUDE_HOME/workspaces/Caddyfile"
+    CADDYLOG="$CLAUDE_HOME/workspaces/.caddy.log"
     mkdir -p "$CLAUDE_HOME/workspaces/.public" "$CLAUDE_HOME/workspaces/caddy.d"
     cp /usr/local/share/caddy/Caddyfile.default "$CADDYFILE" 2>/dev/null || true
-    WEB_SESSION="${CLAUDE_WEB_TMUX_SESSION_NAME:-web}"
-    log "starting caddy (tmux '$WEB_SESSION') on :8080 (serving ~/workspaces/.public)"
-    tmux new-session -d -s "$WEB_SESSION" -c "$CLAUDE_HOME/workspaces" \
-        "caddy run --config '$CADDYFILE' --adapter caddyfile" \
-        || log "WARNING: caddy start failed"
+    # Plain background daemon (NOT a tmux session — caddy is a server, not an
+    # agent). setsid detaches it so it survives `exec "$@"`. Logs to .caddy.log.
+    # Reload after editing caddy.d: `caddy reload --config ~/workspaces/Caddyfile`.
+    log "starting caddy daemon on :8080 (serving ~/workspaces/.public; logs $CADDYLOG)"
+    setsid sh -c "exec caddy run --config '$CADDYFILE' --adapter caddyfile >'$CADDYLOG' 2>&1" </dev/null >/dev/null 2>&1 &
 fi
 
 # 10. Optional detached tmux session running claude. Attach via SSH:
