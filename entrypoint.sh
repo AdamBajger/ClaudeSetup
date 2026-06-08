@@ -122,6 +122,29 @@ if [ -f /usr/local/share/claude/AGENTS.md ]; then
     [ -e "$CLAUDE_HOME/workspaces/CLAUDE.md" ] || printf '@AGENTS.md\n' > "$CLAUDE_HOME/workspaces/CLAUDE.md"
 fi
 
+# 6b. Wire the orchestrator worker-tend SessionStart hook. It is manager-cwd
+#     guarded (inert in worker sessions), so it's always safe to wire. On manager
+#     startup it tells the orchestrator to read each auto-resumed worker's pane
+#     and decide what to send (resolve picker / continue only if interrupted).
+TEND=/usr/local/lib/claude-hooks/worker-tend-reminder.sh
+SETTINGS="$CLAUDE_HOME/.claude/settings.json"
+if [ -x "$TEND" ]; then
+    mkdir -p "$CLAUDE_HOME/.claude"
+    [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
+    tmp=$(mktemp)
+    if jq --arg cmd "$TEND" '
+        .hooks.SessionStart = (.hooks.SessionStart // [])
+        | (if any(.hooks.SessionStart[].hooks[]?; .command == $cmd) then .
+           else .hooks.SessionStart += [{hooks:[{type:"command",command:$cmd,timeout:5}]}] end)
+        ' "$SETTINGS" > "$tmp"; then
+        cat "$tmp" > "$SETTINGS"
+        log "worker-tend hook wired"
+    else
+        log "WARNING: worker-tend hook merge failed (jq?)"
+    fi
+    rm -f "$tmp"
+fi
+
 # 7. Node-free caveman. The upstream caveman plugin's hooks shell out to `node`,
 #    which is not installed (native claude needs no Node) — so they error on
 #    every session start / prompt. Disable the plugin and wire our vendored
@@ -226,41 +249,29 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         sleep 1
     done
     log "network ready after ${n}s (claude.ai HTTP ${code:-none}); starting tmux '$TMUX_SESSION_NAME'"
+    # Orchestrator starts FRESH each pod (the autostart command has no --continue):
+    # it holds no chat state — everything essential lives in files (AGENTS.md via
+    # CLAUDE.md, the worker registry, the SessionStart hooks). So no resume picker
+    # ever appears for the manager. (Workers, by contrast, resume their history.)
     tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$CLAUDE_HOME/workspaces" "$CLAUDE_AUTOSTART_CLAUDE_COMMAND" \
         || log "WARNING: tmux session start failed"
 fi
 
-# 11. Auto-resume registered workers (no manager tokens needed). Each worker
-#     resumes its saved conversation via the resume-worker helper, then gets a
-#     short, generic "continue only if you were interrupted" nudge pasted in via
-#     tell-worker. Backgrounded (setsid) so it never delays sshd readiness;
-#     network was already confirmed ready in step 10.
+# 11. Start (resume) registered worker sessions — token-free, via resume-worker.
+#     We deliberately do NOT answer their pickers or send prompts here: the
+#     orchestrator reads each worker's pane on startup and decides interactively
+#     (see the worker-tend SessionStart hook wired in step 6b). Backgrounded so
+#     sshd readiness is never delayed; network was confirmed ready in step 10.
 REG="$CLAUDE_HOME/workspaces/.workers.json"
 RESUME_HELPER="$CLAUDE_HOME/workspaces/bin/resume-worker"
 if [ -s "$REG" ] && [ -x "$RESUME_HELPER" ] && command -v jq >/dev/null 2>&1; then
-    log "auto-resuming workers from registry (background)"
+    log "resuming worker sessions from registry (background; orchestrator will tend them)"
     setsid sh -c '
-        reg="$1"; rh="$2"; th="$3"; pf="$4"
-        msg=$(cat "$pf" 2>/dev/null)
+        reg="$1"; rh="$2"
         for w in $(jq -r "keys[]" "$reg" 2>/dev/null); do
-            "$rh" "$w" >/dev/null 2>&1 || continue
-            # Large sessions show an interactive "Resume from summary?" picker that
-            # claude has no flag to skip. Answer it with summary (option 1) when it
-            # appears (up to ~10s). ONLY send "1" if the picker text is present —
-            # otherwise "1"+Enter would post "1" as a chat message on a small session.
-            i=0
-            while [ "$i" -lt 10 ]; do
-                if tmux capture-pane -t "$w" -p 2>/dev/null | grep -q "Resume from summary"; then
-                    tmux send-keys -t "$w" "1"; sleep 1; tmux send-keys -t "$w" Enter; sleep 2
-                    break
-                fi
-                i=$((i + 1)); sleep 1
-            done
-            # Now at the prompt → paste the "continue only if interrupted" nudge.
-            [ -n "$msg" ] && [ -x "$th" ] && "$th" "$w" "$msg" >/dev/null 2>&1 || true
+            "$rh" "$w" >/dev/null 2>&1 || true
         done
-    ' _ "$REG" "$RESUME_HELPER" "$CLAUDE_HOME/workspaces/bin/tell-worker" \
-        /usr/local/share/claude/worker-resume.prompt </dev/null >/dev/null 2>&1 &
+    ' _ "$REG" "$RESUME_HELPER" </dev/null >/dev/null 2>&1 &
 fi
 
 # 12. Hand off to CMD.

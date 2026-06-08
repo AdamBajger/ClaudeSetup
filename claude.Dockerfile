@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.6.3"
+LABEL version="0.6.4"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -144,15 +144,17 @@ COPY --chown=root:root slack-monitor/ /usr/local/lib/slack-monitor/
 # YouTrack knowledgebase (articles) REST helper — issues go through the MCP.
 COPY --chown=root:root youtrack/youtrack-kb /usr/local/bin/youtrack-kb
 
-# Generic prompt pasted to each worker on entrypoint auto-resume after a restart.
-COPY --chown=root:root worker-resume.prompt /usr/local/share/claude/worker-resume.prompt
+# Orchestrator startup hook: tend the workers the entrypoint auto-resumed
+# (read each pane, resolve dialogs, continue only interrupted work).
+COPY --chown=root:root worker-tend-reminder.sh /usr/local/lib/claude-hooks/worker-tend-reminder.sh
 
 # Entrypoint script.
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0644 /etc/profile.d/claude.sh && \
     chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/youtrack-kb \
         /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh \
-        /usr/local/lib/slack-monitor/slack-lock /usr/local/lib/slack-monitor/slack-cron-reminder.sh
+        /usr/local/lib/slack-monitor/slack-lock /usr/local/lib/slack-monitor/slack-cron-reminder.sh \
+        /usr/local/lib/claude-hooks/worker-tend-reminder.sh
 
 # ---------------------------------------------------------------------------
 # 5. Runtime metadata

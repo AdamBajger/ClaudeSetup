@@ -45,12 +45,16 @@ NFS PVC survives, rootfs ephemeral.
 - SURVIVE: `~/workspaces/` (this file, bin/, registry, clones, notes), `~/.claude(.json)` (creds+memory+transcripts), `~/.config/gh`, `~/.ssh`.
 - DIE: tmux + claude procs (sessions die, RC URLs dead); `~/.bashrc`/`~/.tmux.conf`/PATH reset; `/dev/shm` default 64M (raise via pod spec for PyTorch).
 - Transcripts `~/.claude/projects/<enc-cwd>/<session-id>.jsonl` on PVC → resumable by id after reinstall/kill.
-Auto-resume on restart (entrypoint, no action needed): manager resumes via `claude --continue`; every worker in `.workers.json` is resumed via `resume-worker` + a short "continue only if interrupted" nudge. Manual fallback:
+On restart (entrypoint, no action needed): **I (manager) start FRESH** — no chat
+history; I reconstruct state from files (this AGENTS.md, `.workers.json`, the
+SessionStart hooks). The entrypoint resumes every worker in `.workers.json` (their
+project work IS stateful) via `resume-worker`; a SessionStart hook then tells me
+to read each worker's pane and resolve its resume picker / continue only if it was
+interrupted. So keep all durable state in files, never in my chat. Manual fallback:
 ```
 list-workers                 # check; RC URLs stale until resumed
 resume-worker <name>         # same convo, new URL (--id for exact session)
 ```
-Resume manager manually: `cd ~/workspaces && claude -c --remote-control claude --dangerously-skip-permissions`.
 
 ## claude flags
 - `--remote-control [name]` — app-steerable; prints `claude.ai/code/session_…` URL = human channel.
