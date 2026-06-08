@@ -13,7 +13,7 @@ User asks project work under `~/workspaces/<proj>/` → CHALLENGE first:
 - Do it myself ONLY if user confirms after flag, OR it's orchestration-level (spawn, registry, this file).
 Default reply to "do X in proj Y" = "hand to Y worker?" — not silent compliance.
 
-## Helpers — `~/workspaces/bin/` (PATH not persisted; re-add each pod: `export PATH="/home/claude/workspaces/bin:$PATH"`)
+## Helpers — `~/workspaces/bin/` (on PATH automatically — baked into image ENV + login profile)
 - `spawn-worker <name> <repo-url> [task]` — clone → start RC worker → wait ready → register → print URL → opt dispatch.
 - `resume-worker <name>` — restart worker, `-c` same convo, new URL. `--id` = exact saved session id.
 - `tell-worker <name> <task...>` — send prompt + submit.
@@ -45,14 +45,12 @@ NFS PVC survives, rootfs ephemeral.
 - SURVIVE: `~/workspaces/` (this file, bin/, registry, clones, notes), `~/.claude(.json)` (creds+memory+transcripts), `~/.config/gh`, `~/.ssh`.
 - DIE: tmux + claude procs (sessions die, RC URLs dead); `~/.bashrc`/`~/.tmux.conf`/PATH reset; `/dev/shm` default 64M (raise via pod spec for PyTorch).
 - Transcripts `~/.claude/projects/<enc-cwd>/<session-id>.jsonl` on PVC → resumable by id after reinstall/kill.
-Resume after reinstall:
+Auto-resume on restart (entrypoint, no action needed): manager resumes via `claude --continue`; every worker in `.workers.json` is resumed via `resume-worker` + a short "continue only if interrupted" nudge. Manual fallback:
 ```
-df -h /dev/shm
-export PATH="/home/claude/workspaces/bin:$PATH"
-list-workers                 # URLs stale/dead
-resume-worker <name>         # same convo, new URL
+list-workers                 # check; RC URLs stale until resumed
+resume-worker <name>         # same convo, new URL (--id for exact session)
 ```
-Resume manager: `cd ~/workspaces && claude -c --remote-control claude --dangerously-skip-permissions`.
+Resume manager manually: `cd ~/workspaces && claude -c --remote-control claude --dangerously-skip-permissions`.
 
 ## claude flags
 - `--remote-control [name]` — app-steerable; prints `claude.ai/code/session_…` URL = human channel.

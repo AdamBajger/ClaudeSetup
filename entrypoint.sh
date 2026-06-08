@@ -244,6 +244,19 @@ if [ -s "$REG" ] && [ -x "$RESUME_HELPER" ] && command -v jq >/dev/null 2>&1; th
         msg=$(cat "$pf" 2>/dev/null)
         for w in $(jq -r "keys[]" "$reg" 2>/dev/null); do
             "$rh" "$w" >/dev/null 2>&1 || continue
+            # Large sessions show an interactive "Resume from summary?" picker that
+            # claude has no flag to skip. Answer it with summary (option 1) when it
+            # appears (up to ~10s). ONLY send "1" if the picker text is present —
+            # otherwise "1"+Enter would post "1" as a chat message on a small session.
+            i=0
+            while [ "$i" -lt 10 ]; do
+                if tmux capture-pane -t "$w" -p 2>/dev/null | grep -q "Resume from summary"; then
+                    tmux send-keys -t "$w" "1"; sleep 1; tmux send-keys -t "$w" Enter; sleep 2
+                    break
+                fi
+                i=$((i + 1)); sleep 1
+            done
+            # Now at the prompt → paste the "continue only if interrupted" nudge.
             [ -n "$msg" ] && [ -x "$th" ] && "$th" "$w" "$msg" >/dev/null 2>&1 || true
         done
     ' _ "$REG" "$RESUME_HELPER" "$CLAUDE_HOME/workspaces/bin/tell-worker" \
