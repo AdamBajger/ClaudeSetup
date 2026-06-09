@@ -27,8 +27,8 @@ Slack via session MCP (ToolSearch: `mcp__claude_ai_Slack__slack_read_channel`,
    with unposted `-> reply:` line, post each to its `thread_ts` (see Hand-off §4). Runs
    even on silent wake.
 1. **Fetch recent** with `slack_read_channel`. Determine which are *new* since last
-   check (vs last noted ts; no record → treat >~1 h old as seen).
-2. **Hard cutoff: ignore any message ts older than 8 h.** Never reply older than 8 h.
+   check (vs last noted ts; no record → treat >~8 h old as seen).
+2. **Hard cutoff:** Never reply to messages older than 8 h.
 3. **No new eligible (≤8 h) messages → stay silent, end turn** (after step 0, which may
    have posted a queued result). Silence is the common, correct outcome.
 
@@ -40,8 +40,7 @@ asks it something) → MUST reply, never leave hanging. Two cases:
 - **Quick + safe** (answerable now, or cheap `uv run` experiment in `{{PROJECT_DIR}}`)
   → do it, reply with concrete answer/result.
 - **Big task** (long run, multi-step impl, anything not safe inside this run) → do NOT
-  attempt here. **Hand off** (below): enqueue in `{{TASKS_FILE}}`, nudge worker, reply
-  in-thread acking it's queued.
+  attempt here. **Hand off to the project worker** (below).
 
 Overrides "stay silent": direct ask always gets ≥ an ack. (Can't tell what's asked →
 brief clarifying question, don't guess.)
@@ -113,6 +112,7 @@ re-posted. This returns a worker's result to whoever asked.
   Never post speculation as fact.
 - Concise, professional. Post via `slack_send_message` to `{{CHANNEL_ID}}`; `thread_ts`
   to reply in-thread.
+- do not append footer, it is added automatically by Slack connector.
 
 ## Active-discussion polling — 3 × 3-minute
 
@@ -121,7 +121,7 @@ After posting a reply, don't end immediately — give others time:
 1. `sleep 180`, then re-read (`slack_read_channel`). After each poll run
    `/home/claude/workspaces/bin/slack-lock refresh {{MONITOR_NAME}}` to keep the lock
    fresh while active.
-2. New eligible (≤8 h) message warrants reply → reply, **reset** the window (fresh 3 × 3).
+2. New eligible message warrants reply → reply, **reset** the window (fresh 3 × 3).
 3. Poll finds nothing new/eligible → wait 3 min, re-read, up to **3 intervals** (~9 min
    quiet after last reply).
 4. 3 consecutive empty polls → end the run.
