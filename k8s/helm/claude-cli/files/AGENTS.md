@@ -45,6 +45,7 @@ NFS PVC survives, rootfs ephemeral.
 - SURVIVE: `~/workspaces/` (this file, bin/, registry, clones, notes), `~/.claude(.json)` (creds+memory+transcripts), `~/.config/gh`, `~/.ssh`.
 - DIE: tmux + claude procs (sessions die, RC URLs dead); `~/.bashrc`/`~/.tmux.conf`/PATH reset; `/dev/shm` default 64M (raise via pod spec for PyTorch).
 - Transcripts `~/.claude/projects/<enc-cwd>/<session-id>.jsonl` on PVC → resumable by id after reinstall/kill.
+- Slack monitors: crons session-only → die on reinstall. Registry `.slack_monitors.json` survives; `_slack-cron-reminder.sh` startup hook reminds. Re-arm: `CronList`; per registered monitor missing its `[scheduled: <name>]` job → `CronCreate(cron, recurring=true)` from exact `prompt_file` (resets 7-day expiry). New monitors: skill `enable-slack-channel-monitoring`.
 On restart (entrypoint, no action needed): **I (manager) start FRESH** — no chat
 history; I reconstruct state from files (this AGENTS.md, `.workers.json`, the
 SessionStart hooks). The entrypoint resumes every worker in `.workers.json` (their
