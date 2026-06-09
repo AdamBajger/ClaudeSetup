@@ -1,19 +1,16 @@
 #!/bin/sh
-# Container entrypoint. Runs as unprivileged `claude` user. Idempotent.
-#  1. Generate ed25519 SSH host key into ~/.ssh/host-keys if missing (ephemeral).
-#  2. Hydrate ~/.ssh/authorized_keys from $AUTHORIZED_KEYS (additive + deduped).
-#  3. Export GH_TOKEN / HF_TOKEN to ~/.claude-env for SSH-spawned shells.
-#  4. gh auth login if $GH_TOKEN set and not already authenticated.
-#  5. Pre-accept the workspace trust dialog for ~/workspaces in ~/.claude.json.
-#  6. Seed agent skills + orchestrator AGENTS.md from the image (single source
-#     for docker compose and k8s).
-#  7. Wire node-free caveman hooks into ~/.claude/settings.json (disable plugin).
-#  8. Configure optional integrations: YouTrack MCP (if host+token) and the Slack
-#     channel-monitoring tools + cron-reminder hook.
-#  9. Optionally start caddy web server ($CLAUDE_WEB_ENABLED) to share viz.
-# 10. Spawn detached tmux session if $CLAUDE_AUTOSTART_CLAUDE_COMMAND set.
-# 11. Auto-resume registered workers from the registry (background).
-# 12. exec CMD (sshd -D -e by default).
+# Container entrypoint. Unprivileged `claude` user. Idempotent. Shared by docker
+# compose and k8s. Steps:
+#  0. Data bootstrap (compose parity w/ k8s init): dirs, .claude.json onboarding,
+#     .bash_history, credentials from $CLAUDE_CREDENTIALS_JSON. Idempotent, only
+#     re-seeds creds when $CLAUDE_CREDENTIALS_JSON changes (k8s leaves it unset,
+#     seeds from Secret file).
+#  1. ed25519 SSH host key (ephemeral).        7. Wire node-free caveman hooks.
+#  2. authorized_keys from $AUTHORIZED_KEYS.   8. YouTrack MCP + Slack tooling.
+#  3. Export GH/HF tokens for SSH shells.      9. caddy web server ($CLAUDE_WEB_ENABLED).
+#  4. gh auth login.                          10. Autostart detached tmux claude.
+#  5. Pre-accept workspace trust dialog.      11. Auto-resume registered workers.
+#  6. Seed skills + orchestrator AGENTS.md.   12. exec CMD (sshd -D -e default).
 set -eu
 
 CLAUDE_HOME=/home/claude
@@ -22,7 +19,26 @@ AUTH_KEYS_FILE="$CLAUDE_HOME/.ssh/authorized_keys"
 
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 
-# 1. SSH host key (ed25519)
+# 0. Data bootstrap
+mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces"
+CJSON="$CLAUDE_HOME/.claude.json"
+if [ ! -s "$CJSON" ] || [ "$(cat "$CJSON" 2>/dev/null)" = '{}' ]; then
+    printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJSON"
+fi
+[ -e "$CLAUDE_HOME/.bash_history" ] || touch "$CLAUDE_HOME/.bash_history"
+if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
+    CREDS="$CLAUDE_HOME/.claude/.credentials.json"
+    newhash=$(printf '%s' "$CLAUDE_CREDENTIALS_JSON" | md5sum | cut -d' ' -f1)
+    oldhash=$(cat "$CLAUDE_HOME/.claude/.cred-bootstrap-hash" 2>/dev/null || true)
+    if [ ! -e "$CREDS" ] || [ "$newhash" != "$oldhash" ]; then
+        printf '%s' "$CLAUDE_CREDENTIALS_JSON" > "$CREDS"
+        chmod 600 "$CREDS"
+        printf '%s\n' "$newhash" > "$CLAUDE_HOME/.claude/.cred-bootstrap-hash"
+        log "credentials bootstrapped from \$CLAUDE_CREDENTIALS_JSON"
+    fi
+fi
+
+# 1. SSH host key
 mkdir -p "$SSH_KEYDIR"
 chmod 700 "$SSH_KEYDIR"
 HOST_KEY="$SSH_KEYDIR/ssh_host_ed25519_key"
@@ -33,7 +49,7 @@ fi
 chmod 600 "$HOST_KEY"
 [ -f "$HOST_KEY.pub" ] && chmod 644 "$HOST_KEY.pub"
 
-# 2. authorized_keys (additive + deduped)
+# 2. authorized_keys
 mkdir -p "$CLAUDE_HOME/.ssh"
 chmod 700 "$CLAUDE_HOME/.ssh"
 touch "$AUTH_KEYS_FILE"
@@ -51,7 +67,7 @@ if [ ! -s "$AUTH_KEYS_FILE" ]; then
     log "WARNING: authorized_keys is empty. Set AUTHORIZED_KEYS in .env."
 fi
 
-# 3. Export tokens to SSH login shells (sshd-forked sessions don't inherit PID 1 env).
+# 3. Export tokens to SSH login shells
 ENV_FILE="$CLAUDE_HOME/.claude-env"
 : > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -77,16 +93,14 @@ if [ -n "${GH_TOKEN:-}" ]; then
     gh auth setup-git >/dev/null 2>&1 || true
 fi
 
-# 5. Pre-accept the workspace trust dialog for the autostart working dir.
-#    Trust is a separate boundary from --dangerously-skip-permissions and has
-#    no settings/env bypass; the only non-interactive route is the per-project
-#    flag in the user-level ~/.claude.json. Idempotent jq merge — auto-vivifies
-#    the nesting and runs before claude launches, so the TUI never prompts.
+# 5. Pre-accept the workspace trust dialog. Trust is separate from
+#    --dangerously-skip-permissions with no env bypass; only route is the
+#    per-project flag in ~/.claude.json. jq merge, runs before claude launches.
 CLAUDE_JSON="$CLAUDE_HOME/.claude.json"
 WORKDIR="$CLAUDE_HOME/workspaces"
 [ -s "$CLAUDE_JSON" ] || printf '{}\n' > "$CLAUDE_JSON"
-# Write in place (cat >) rather than mv: ~/.claude.json is a subPath bind-mount,
-# so renaming over it fails with "Device or resource busy".
+# Write in place (cat >) not mv: ~/.claude.json is a subPath bind-mount → rename
+# fails "Device or resource busy".
 tmp=$(mktemp)
 if jq --arg d "$WORKDIR" \
       '.projects[$d].hasTrustDialogAccepted = true' "$CLAUDE_JSON" > "$tmp"; then
@@ -97,14 +111,10 @@ else
 fi
 rm -f "$tmp"
 
-# 6. Seed agent skills + the orchestrator AGENTS.md from the image. Baking these
-#    (rather than k8s ConfigMaps) keeps ONE source for both docker compose and
-#    k8s. Add a skill = drop a dir under skills/ in the repo.
-#    - Skills: overwrite every start (image is source of truth). User-authored
-#      skills under other names in ~/.claude/skills are left untouched.
-#    - AGENTS.md: seed only if absent (the manager edits it in-session; don't
-#      clobber). Pair it with a CLAUDE.md that @-imports it — claude loads
-#      CLAUDE.md, not AGENTS.md.
+# 6. Seed skills + orchestrator AGENTS.md from the image (one source for compose
+#    and k8s; add a skill = drop a dir under skills/). Skills overwrite every
+#    start (image is source of truth); user-authored skills under other names are
+#    left untouched. AGENTS.md seeded only if absent (manager edits it in-session).
 SKILLSRC=/usr/local/share/claude-skills
 if [ -d "$SKILLSRC" ]; then
     mkdir -p "$CLAUDE_HOME/.claude/skills"
@@ -119,14 +129,15 @@ fi
 if [ -f /usr/local/share/claude/AGENTS.md ]; then
     mkdir -p "$CLAUDE_HOME/workspaces"
     [ -e "$CLAUDE_HOME/workspaces/AGENTS.md" ] || cp /usr/local/share/claude/AGENTS.md "$CLAUDE_HOME/workspaces/AGENTS.md"
-    [ -e "$CLAUDE_HOME/workspaces/CLAUDE.md" ] || printf '@AGENTS.md\n' > "$CLAUDE_HOME/workspaces/CLAUDE.md"
+    # AGENTS.md goes into the MANAGER session only (manager-startup hook, cwd-guarded).
+    # NO ~/workspaces/CLAUDE.md: claude loads it from every ANCESTOR dir → would leak
+    # the orchestrator role into workers. Migrate away the stale managed @AGENTS.md.
+    [ "$(cat "$CLAUDE_HOME/workspaces/CLAUDE.md" 2>/dev/null)" = "@AGENTS.md" ] && rm -f "$CLAUDE_HOME/workspaces/CLAUDE.md"
 fi
 
-# 6b. Wire the orchestrator worker-tend SessionStart hook. It is manager-cwd
-#     guarded (inert in worker sessions), so it's always safe to wire. On manager
-#     startup it tells the orchestrator to read each auto-resumed worker's pane
-#     and decide what to send (resolve picker / continue only if interrupted).
-TEND=/usr/local/lib/claude-hooks/worker-tend-reminder.sh
+# 6b. Wire the manager-startup SessionStart hook (cwd-guarded → inert in workers,
+#     always safe to wire). For the manager: injects AGENTS.md + tend-workers prompt.
+TEND=/usr/local/lib/claude-hooks/manager-startup.sh
 SETTINGS="$CLAUDE_HOME/.claude/settings.json"
 if [ -x "$TEND" ]; then
     mkdir -p "$CLAUDE_HOME/.claude"
@@ -138,18 +149,16 @@ if [ -x "$TEND" ]; then
            else .hooks.SessionStart += [{hooks:[{type:"command",command:$cmd,timeout:5}]}] end)
         ' "$SETTINGS" > "$tmp"; then
         cat "$tmp" > "$SETTINGS"
-        log "worker-tend hook wired"
+        log "manager-startup hook wired"
     else
-        log "WARNING: worker-tend hook merge failed (jq?)"
+        log "WARNING: manager-startup hook merge failed (jq?)"
     fi
     rm -f "$tmp"
 fi
 
-# 7. Node-free caveman. The upstream caveman plugin's hooks shell out to `node`,
-#    which is not installed (native claude needs no Node) — so they error on
-#    every session start / prompt. Disable the plugin and wire our vendored
-#    POSIX-sh hooks (/usr/local/lib/caveman) into settings.json instead. The
-#    /caveman skill itself is seeded by the generic loop in step 6.
+# 7. Node-free caveman. Upstream plugin hooks shell out to `node` (not installed,
+#    native claude needs none) → error every session. Disable the plugin, wire our
+#    POSIX-sh hooks instead. The /caveman skill is seeded by the step 6 loop.
 CAVE=/usr/local/lib/caveman
 SETTINGS="$CLAUDE_HOME/.claude/settings.json"
 if [ -x "$CAVE/caveman-activate.sh" ]; then
@@ -173,10 +182,10 @@ if [ -x "$CAVE/caveman-activate.sh" ]; then
     rm -f "$tmp"
 fi
 
-# 8. Optional MCP servers + integrations. Sessions load MCP tools on start, so
-#    configuring here (before the autostart claude) is enough — no restart needed.
+# 8. Optional MCP + integrations. Sessions load MCP tools on start, so configuring
+#    here (before the autostart claude) needs no restart.
 
-# 8a. YouTrack MCP — only if both host and token are provided. Re-add idempotently.
+# 8a. YouTrack MCP — only if both host and token set. Re-add idempotently.
 if [ -n "${YT_HOST:-}" ] && [ -n "${YT_TOKEN:-}" ]; then
     claude mcp remove -s user youtrack >/dev/null 2>&1 || true
     if claude mcp add -s user -t http youtrack "${YT_HOST%/}/mcp" \
@@ -188,10 +197,10 @@ if [ -n "${YT_HOST:-}" ] && [ -n "${YT_TOKEN:-}" ]; then
 fi
 
 # 8b. Slack channel-monitoring tooling (always installed — harmless when unused).
-#     The Slack MCP itself is an account-level claude.ai connector (cannot be
-#     baked). The enable-slack-channel-monitoring skill is the real toggle; this
-#     just installs the generic tools + the manager-only cron-reminder hook,
-#     which is registry-driven and stays silent until a monitor is registered.
+#     Slack MCP itself is an account-level claude.ai connector (can't be baked).
+#     The enable-slack-channel-monitoring skill is the toggle; this installs the
+#     tools + a registry-driven cron-reminder hook that's silent until a monitor
+#     is registered.
 SLACKLIB=/usr/local/lib/slack-monitor
 if [ -d "$SLACKLIB" ]; then
     mkdir -p "$CLAUDE_HOME/workspaces/bin"
@@ -215,32 +224,27 @@ if [ -d "$SLACKLIB" ]; then
     rm -f "$tmp"
 fi
 
-# 9. Optional web server (caddy) to share HTML from ~/workspaces over the cluster
-#    Ingress. Gated on $CLAUDE_WEB_ENABLED. caddy serves ONLY ~/workspaces/.public
-#    (symlinks managed by `webshare`) + optional ~/workspaces/caddy.d/*.caddy
-#    snippets — never the whole tree. The Caddyfile is managed (overwritten each
-#    start); publish via `webshare add <name> <dir>`, not by editing it.
+# 9. Optional caddy web server ($CLAUDE_WEB_ENABLED). Serves ONLY
+#    ~/workspaces/.public (symlinks via `webshare`) + ~/workspaces/caddy.d/*.caddy
+#    snippets — never the whole tree. Caddyfile is managed (overwritten each start);
+#    publish via `webshare add <name> <dir>`.
 if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>&1; then
     CADDYFILE="$CLAUDE_HOME/workspaces/Caddyfile"
     CADDYLOG="$CLAUDE_HOME/workspaces/.caddy.log"
     mkdir -p "$CLAUDE_HOME/workspaces/.public" "$CLAUDE_HOME/workspaces/caddy.d"
     cp /usr/local/share/caddy/Caddyfile.default "$CADDYFILE" 2>/dev/null || true
-    # Plain background daemon (NOT a tmux session — caddy is a server, not an
-    # agent). setsid detaches it so it survives `exec "$@"`. Logs to .caddy.log.
-    # Reload after editing caddy.d: `caddy reload --config ~/workspaces/Caddyfile`.
+    # Plain background daemon (not tmux — caddy is a server). setsid detaches it so
+    # it survives `exec "$@"`. Reload caddy.d: `caddy reload --config ~/workspaces/Caddyfile`.
     log "starting caddy daemon on :8080 (serving ~/workspaces/.public; logs $CADDYLOG)"
     setsid sh -c "exec caddy run --config '$CADDYFILE' --adapter caddyfile >'$CADDYLOG' 2>&1" </dev/null >/dev/null 2>&1 &
 fi
 
-# 10. Optional detached tmux session running claude. Attach via SSH:
-#      tmux attach -t "$CLAUDE_AUTOSTART_TMUX_SESSION_NAME"
+# 10. Optional detached tmux session running claude. Attach: tmux attach -t <name>.
 if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     TMUX_SESSION_NAME="${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
-    # Wait for outbound connectivity before launching. At pod boot the CNI/DNS/
-    # egress can lag a few seconds; claude's remote-control connection does NOT
-    # retry if its first attempt fails, so launching too early leaves a live but
-    # disconnected session. Poll claude.ai until any HTTP response (DNS+TCP+TLS
-    # all working) before starting, up to ~30s.
+    # Wait for outbound connectivity first: claude's remote-control connect does NOT
+    # retry, so launching before CNI/DNS/egress is up leaves a live-but-disconnected
+    # session. Poll claude.ai for any HTTP response (DNS+TCP+TLS ok), up to ~30s.
     n=0
     while [ "$n" -lt 30 ]; do
         code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 https://claude.ai 2>/dev/null || true)
@@ -249,19 +253,14 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         sleep 1
     done
     log "network ready after ${n}s (claude.ai HTTP ${code:-none}); starting tmux '$TMUX_SESSION_NAME'"
-    # Orchestrator starts FRESH each pod (the autostart command has no --continue):
-    # it holds no chat state — everything essential lives in files (AGENTS.md via
-    # CLAUDE.md, the worker registry, the SessionStart hooks). So no resume picker
-    # ever appears for the manager. (Workers, by contrast, resume their history.)
+    # Orchestrator starts FRESH each pod (no --continue): holds no chat state, rebuilds
+    # from files (AGENTS.md hook, worker registry). No resume picker for the manager.
     tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$CLAUDE_HOME/workspaces" "$CLAUDE_AUTOSTART_CLAUDE_COMMAND" \
         || log "WARNING: tmux session start failed"
 fi
 
-# 11. Start (resume) registered worker sessions — token-free, via resume-worker.
-#     We deliberately do NOT answer their pickers or send prompts here: the
-#     orchestrator reads each worker's pane on startup and decides interactively
-#     (see the worker-tend SessionStart hook wired in step 6b). Backgrounded so
-#     sshd readiness is never delayed; network was confirmed ready in step 10.
+# 11. Resume registered worker sessions (token-free, via resume-worker). We do NOT
+#     answer their pickers here — the orchestrator reads each pane and decides
 REG="$CLAUDE_HOME/workspaces/.workers.json"
 RESUME_HELPER="$CLAUDE_HOME/workspaces/bin/resume-worker"
 if [ -s "$REG" ] && [ -x "$RESUME_HELPER" ] && command -v jq >/dev/null 2>&1; then

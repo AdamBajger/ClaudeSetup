@@ -76,7 +76,10 @@ claude:
   autoStartTmux:
     enabled: true
     tmuxSessionName: "claude"
-    claudeCommand: "claude --remote-control --dangerously-skip-permissions" # --resume \"Your selected session name\""
+    # Name the remote-control session (recommended): without a name it auto-names
+    # by hostname and reattaches to the prior cloud session instead of starting
+    # fresh. No --continue → fresh each pod (state lives in files).
+    claudeCommand: "claude --remote-control \"My Orchestrator\" --dangerously-skip-permissions"
 
 # GPU request — mirrors resolve_gpu() from job-submitting utility.
 # Whole-GPU types ("A100" | "A40" | "H100" | "Tesla P100") add
