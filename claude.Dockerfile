@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.6.6"
+LABEL version="0.6.8"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -28,6 +28,9 @@ LABEL version="0.6.6"
 #   - build-essential, pkg-config: native compile (rust crates + pip packages
 #       with C deps); pulls gcc/g++/make/libc-dev
 #   - gnupg: needed at build time to verify the GitHub CLI apt repo signing key
+#   - locales: glibc locale data + locale-gen; cs_CZ.UTF-8 generated below so
+#       workers using Babel/pint with Czech locale can setlocale() (rootless pod
+#       can't install/generate locales at runtime)
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -35,7 +38,7 @@ RUN apt-get update && \
         git \
         openssh-server openssh-client \
         build-essential pkg-config \
-        gnupg && \
+        gnupg locales && \
     # GitHub CLI from upstream apt repo (bookworm main has no `gh` package).
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
@@ -44,6 +47,10 @@ RUN apt-get update && \
         > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends gh && \
+    # Generate the Czech UTF-8 locale (workers' Babel/pint need it; rootless
+    # runtime can't run locale-gen itself). Uncomment the entry, then build it.
+    sed -i 's/^# *cs_CZ.UTF-8 UTF-8/cs_CZ.UTF-8 UTF-8/' /etc/locale.gen && \
+    locale-gen && \
     rm -rf /var/lib/apt/lists/*
 
 # caddy — single static Go binary used to serve/reverse-proxy HTML viz from
@@ -160,7 +167,7 @@ RUN chmod 0644 /etc/profile.d/claude.sh && \
 # 5. Runtime metadata
 # ---------------------------------------------------------------------------
 USER claude
-EXPOSE 2222
+EXPOSE 2222 80 443
 
 # tini as PID 1 reaps zombies (each SSH session forks shells whose subprocesses
 # get reparented when interactive users exit — without an init these accumulate).

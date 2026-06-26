@@ -1,11 +1,26 @@
-{{- $svc := printf "%s-ssh" (include "claude-cli.fullname" .) -}}
+{{- $svc := printf "%s-public" (include "claude-cli.fullname" .) -}}
 Release "{{ .Release.Name }}" installed in namespace "{{ .Release.Namespace }}".
-
-Wait for the SSH endpoint:
+{{ if .Values.public.enabled }}
+Wait for the public endpoint (one LB carries SSH + HTTP + HTTPS):
   kubectl -n {{ .Release.Namespace }} get svc {{ $svc }} -w
-
-Connect (port {{ .Values.service.port }}):
-  ssh -p {{ .Values.service.port }} claude@<EXTERNAL-IP-or-NODE-IP>
+{{ if .Values.public.host }}
+ExternalDNS publishes A + AAAA for {{ .Values.public.host }} once the LB has an IP.
+{{- if .Values.public.ssh.enabled }}
+SSH:
+  ssh{{ if ne (.Values.public.ssh.port | default 22 | toString) "22" }} -p {{ .Values.public.ssh.port }}{{ end }} claude@{{ .Values.public.host }}
+{{- end }}
+{{- if .Values.public.web.enabled }}
+Web:
+  https://{{ .Values.public.host }}/    (caddy auto-TLS{{ if .Values.public.web.staging }}; LE STAGING — browser will warn until you flip staging:false{{ end }})
+  publish: kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "claude-cli.fullname" . }} -- webshare add <name> <dir>
+{{- end }}
+{{- else }}
+No public.host set — LB has an IP but no DNS name. Find it with the command above.
+{{- end }}
+{{- else }}
+public.enabled=false — no Service. Access via:
+  kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "claude-cli.fullname" . }} -- bash
+{{- end }}
 
 Auth:
 - Secret: {{ include "claude-cli.secretName" . }}
@@ -16,7 +31,7 @@ Auth:
       rm /home/claude/.claude/.credentials.json
     kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "claude-cli.fullname" . }}
 
-{{- if and (not .Values.auth.existingSecret) (eq .Values.auth.authorizedKeys "") }}
+{{- if and (not .Values.auth.existingSecret) (not (include "claude-cli.authorizedKeys" . | trim)) }}
 
 WARNING: auth.authorizedKeys is empty. SSH will reject all logins.
 {{- end }}
