@@ -1,0 +1,44 @@
+{{- if .Values.public.enabled }}
+# Single public endpoint: one LoadBalancer (IPv4 + IPv6) carrying SSH (22),
+# HTTP (80) and HTTPS (443). caddy in the pod terminates TLS (auto Let's
+# Encrypt) — no nginx Ingress / cert-manager. ExternalDNS publishes A + AAAA
+# for public.host from the annotation below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "claude-cli.fullname" . }}-public
+  labels:
+    {{- include "claude-cli.labels" . | nindent 4 }}
+  {{- with .Values.public.host }}
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: {{ . | quote }}
+  {{- end }}
+spec:
+  type: {{ .Values.public.type | default "LoadBalancer" }}
+  {{- if .Values.public.dualStack }}
+  # Request IPv6 alongside IPv4 so the LB (and its AAAA record) is reachable
+  # over IPv6 — pods on this cluster already carry a public IPv6.
+  ipFamilyPolicy: PreferDualStack
+  ipFamilies: [IPv4, IPv6]
+  {{- end }}
+  {{- if eq (.Values.public.type | default "LoadBalancer") "LoadBalancer" }}
+  # LB fronts the pod directly; node ports add nothing and waste the range.
+  allocateLoadBalancerNodePorts: false
+  {{- with .Values.public.sourceRanges }}
+  # Firewall allowlist (applies to ALL ports). List BOTH IPv4 and IPv6 CIDRs
+  # when dualStack — otherwise the unlisted family is left wide open.
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  selector:
+    {{- include "claude-cli.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- if .Values.public.ssh.enabled }}
+    - { name: ssh,   port: {{ .Values.public.ssh.port | default 22 }}, targetPort: ssh,   protocol: TCP }
+    {{- end }}
+    {{- if .Values.public.web.enabled }}
+    - { name: http,  port: 80,  targetPort: http,  protocol: TCP }
+    - { name: https, port: 443, targetPort: https, protocol: TCP }
+    {{- end }}
+{{- end }}

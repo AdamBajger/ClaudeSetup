@@ -33,6 +33,15 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+        {{- if .Values.public.web.enabled }}
+        # Let the rootless caddy bind :80/:443. This is a "safe" sysctl (per-pod
+        # net namespace, k8s 1.22+) so it's allowed under PodSecurity
+        # "restricted" — unlike file-caps/NET_BIND_SERVICE, which no_new_privs
+        # (allowPrivilegeEscalation:false) would silently ignore on exec.
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "0"
+        {{- end }}
       initContainers:
         - name: init-data
           image: busybox:1.36
@@ -85,8 +94,9 @@ spec:
               drop: [ALL]
           ports:
             - { name: ssh, containerPort: 2222, protocol: TCP }
-            {{- if .Values.web.enabled }}
-            - { name: web, containerPort: {{ .Values.web.port | default 8080 }}, protocol: TCP }
+            {{- if .Values.public.web.enabled }}
+            - { name: http,  containerPort: 80,  protocol: TCP }
+            - { name: https, containerPort: 443, protocol: TCP }
             {{- end }}
           env:
             - name: AUTHORIZED_KEYS
@@ -112,9 +122,23 @@ spec:
             - name: CLAUDE_AUTOSTART_CLAUDE_COMMAND
               value: {{ .Values.claude.autoStartTmux.claudeCommand | quote }}
             {{- end }}
-            {{- if .Values.web.enabled }}
+            {{- if .Values.public.web.enabled }}
             - name: CLAUDE_WEB_ENABLED
               value: "true"
+            {{- with .Values.public.host }}
+            # caddy needs the public host to obtain + serve its TLS cert.
+            - name: CLAUDE_WEB_HOST
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.public.web.email }}
+            - name: CLAUDE_ACME_EMAIL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.public.web.staging }}
+            # LE staging: untrusted certs, but no rate limit while testing.
+            - name: CLAUDE_ACME_CA
+              value: "https://acme-staging-v02.api.letsencrypt.org/directory"
+            {{- end }}
             {{- end }}
             {{- with .Values.youtrack.host }}
             - name: YT_HOST

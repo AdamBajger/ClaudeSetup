@@ -226,16 +226,41 @@ fi
 
 # 9. Optional caddy web server ($CLAUDE_WEB_ENABLED). Serves ONLY
 #    ~/workspaces/.public (symlinks via `webshare`) + ~/workspaces/caddy.d/*.caddy
-#    snippets — never the whole tree. Caddyfile is managed (overwritten each start);
-#    publish via `webshare add <name> <dir>`.
+#    snippets — never the whole tree. The Caddyfile is GENERATED here each start
+#    (publish via `webshare add <name> <dir>`); edit routing via caddy.d snippets,
+#    not the Caddyfile.
+#    Two modes, chosen by $CLAUDE_WEB_HOST:
+#      - set   (k8s): public vhost, caddy auto-obtains a Let's Encrypt cert and
+#                     terminates HTTPS on :443 (+ :80 redirect). Needs the
+#                     NET_BIND_SERVICE cap + the file-cap baked on the binary.
+#      - unset (compose/local): plain HTTP on :8080 (no public host to certify).
+#    Cert + ACME-account storage lives on the PVC ($CADDYDATA) so renewals
+#    survive restarts and we don't re-hit Let's Encrypt rate limits.
 if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>&1; then
     CADDYFILE="$CLAUDE_HOME/workspaces/Caddyfile"
     CADDYLOG="$CLAUDE_HOME/workspaces/.caddy.log"
-    mkdir -p "$CLAUDE_HOME/workspaces/.public" "$CLAUDE_HOME/workspaces/caddy.d"
-    cp /usr/local/share/caddy/Caddyfile.default "$CADDYFILE" 2>/dev/null || true
-    # Plain background daemon (not tmux — caddy is a server). setsid detaches it so
-    # it survives `exec "$@"`. Reload caddy.d: `caddy reload --config ~/workspaces/Caddyfile`.
-    log "starting caddy daemon on :8080 (serving ~/workspaces/.public; logs $CADDYLOG)"
+    CADDYDATA="$CLAUDE_HOME/workspaces/.caddy"
+    PUBROOT="$CLAUDE_HOME/workspaces/.public"
+    mkdir -p "$PUBROOT" "$CLAUDE_HOME/workspaces/caddy.d" "$CADDYDATA"
+    {
+        printf '{\n'
+        printf '\tstorage file_system %s\n' "$CADDYDATA"
+        [ -n "${CLAUDE_ACME_EMAIL:-}" ] && printf '\temail %s\n' "$CLAUDE_ACME_EMAIL"
+        [ -n "${CLAUDE_ACME_CA:-}" ]    && printf '\tacme_ca %s\n' "$CLAUDE_ACME_CA"
+        printf '}\n\n'
+        if [ -n "${CLAUDE_WEB_HOST:-}" ]; then
+            printf '%s {\n' "$CLAUDE_WEB_HOST"
+        else
+            printf ':8080 {\n'
+        fi
+        printf '\troot * %s\n' "$PUBROOT"
+        printf '\tfile_server browse\n'
+        printf '\timport %s/workspaces/caddy.d/*.caddy\n' "$CLAUDE_HOME"
+        printf '}\n'
+    } > "$CADDYFILE"
+    # Background daemon (not tmux — caddy is a server). setsid detaches it so it
+    # survives `exec "$@"`. Reload caddy.d: `caddy reload --config ~/workspaces/Caddyfile`.
+    log "starting caddy (${CLAUDE_WEB_HOST:-:8080}; storage $CADDYDATA; logs $CADDYLOG)"
     setsid sh -c "exec caddy run --config '$CADDYFILE' --adapter caddyfile >'$CADDYLOG' 2>&1" </dev/null >/dev/null 2>&1 &
 fi
 

@@ -13,6 +13,23 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+authorized_keys content. Accepts auth.authorizedKeys as either:
+  - a YAML list of public-key lines (recommended), or
+  - a single multi-line string (back-compat).
+Renders one key per line; the entrypoint dedupes + merges into ~/.ssh/authorized_keys.
+*/}}
+{{- define "claude-cli.authorizedKeys" -}}
+{{- $ak := .Values.auth.authorizedKeys -}}
+{{- if kindIs "slice" $ak -}}
+{{- range $ak }}
+{{ . | trim }}
+{{- end -}}
+{{- else -}}
+{{- $ak -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Resolved Secret name — either user-supplied existingSecret or chart-created. */}}
 {{- define "claude-cli.secretName" -}}
 {{- if .Values.auth.existingSecret -}}

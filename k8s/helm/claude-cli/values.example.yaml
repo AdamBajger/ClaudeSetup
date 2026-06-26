@@ -16,8 +16,15 @@ auth:
 
   # Fallback: chart creates a Secret from these values. Plaintext in values.yaml —
   # only use for local/testing or when the values file itself is encrypted.
-  authorizedKeys: |-
-    ssh-ed25519 YOUR_PUBLIC_KEY john.doe@proton.me
+  # SSH public keys allowed to log in as `claude`. Accepts a YAML list (one key
+  # per item, recommended) OR a single multi-line block scalar (back-compat).
+  # Keys are merged + deduped into ~/.ssh/authorized_keys on pod start.
+  authorizedKeys:
+    - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP7NHRZqsXu7qCGYj9lAPUdJnA4Ts2XjprYO/9PBtAWY adamb@xiaomi-redmi-note-11s5g
+    # - ssh-ed25519 ANOTHER_KEY jane.doe@example.com
+  # Equivalent block-scalar form (either works):
+  #   authorizedKeys: |-
+  #     ssh-ed25519 YOUR_PUBLIC_KEY john.doe@proton.me
   # Raw contents of ~/.claude/.credentials.json (single-line JSON, or YAML
   # block scalar). Bootstrapped onto the PVC on first pod start; CLI then owns
   # the file and refreshes tokens in place. To re-bootstrap from this value,
@@ -32,9 +39,30 @@ auth:
   hfToken: "hf_..."              # optional HF_TOKEN (HuggingFace)
   ytToken: ""                    # optional YouTrack permanent token (perm-...); pair with youtrack.host
 
-service:
-  type: ClusterIP       # LoadBalancer | NodePort | ClusterIP
-  port: 2222
+# --- Public endpoint ----------------------------------------------------------
+# ONE LoadBalancer (IPv4 + IPv6) + ONE FQDN (public.host) serve everything:
+#   port 22  -> sshd            (public.ssh.enabled)
+#   port 80  -> caddy (HTTP, redirects to HTTPS + serves the ACME challenge)
+#   port 443 -> caddy (HTTPS, auto Let's Encrypt cert for public.host)
+# caddy terminates TLS itself — there is NO nginx Ingress / cert-manager.
+# ExternalDNS publishes A + AAAA for the LB from public.host (single source of
+# truth: DNS + TLS SAN + caddy vhost + SSH target).
+#
+# enabled=false drops the Service entirely (sshd + caddy still run in-pod; reach
+# them via `kubectl exec` / port-forward).
+public:
+  enabled: true
+  host: claude-bajger.dyn.cloud.e-infra.cz   # SINGLE source of truth ("" = no DNS/TLS)
+  type: LoadBalancer        # LoadBalancer (public) | NodePort | ClusterIP
+  dualStack: true           # request IPv6 + IPv4 (needed for IPv6)
+  sourceRanges: []          # firewall allowlist for ALL ports; list BOTH v4 + v6 CIDRs
+  ssh:
+    enabled: true           # expose 22 -> sshd
+    port: 22                # LB listen port for SSH (targets in-pod 2222)
+  web:
+    enabled: true           # expose 80 + 443 -> caddy (auto-TLS)
+    email: ""               # ACME account email (recommended; "" = anonymous)
+    staging: false          # true = LE staging endpoint (untrusted certs, no rate limit)
 
 persistence:
   size: 20Gi
@@ -49,18 +77,8 @@ resources:
 # = use the 64Mi default.
 shmSize: ""
 
-# Expose HTML visualisations from ~/workspaces over HTTPS via Ingress + an
-# in-pod caddy server (port 8080). Edit ~/workspaces/Caddyfile (persisted) to
-# add projects / reverse-proxy local ports. cert-manager issues the TLS cert.
-web:
-  enabled: false
-  host: "bajger.dyn.cloud.e-infra.cz"                 # e.g. myapp.dyn.cloud.e-infra.cz  (REQUIRED when enabled)
-  port: 8080
-  tls: true
-  clusterIssuer: "letsencrypt-prod"   # cert-manager ClusterIssuer ("" to skip TLS)
-  ingressClassName: ""     # empty = cluster default; e.g. "nginx" / "traefik"
-  ingressAnnotations: {}
-  extraHosts: []           # additional hostnames routed to the same caddy
+# Publish HTML/apps from ~/workspaces over HTTPS: see the `public` block above
+# (caddy serves ~/workspaces/.public; manage with `webshare add <name> <dir>`).
 
 # --- Plugin-like integrations -------------------------------------------------
 # YouTrack MCP — configured only if BOTH youtrack.host and auth.ytToken are set.
