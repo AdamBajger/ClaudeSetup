@@ -47,7 +47,8 @@ services:
     volumes:
       # Persisted state under ./container_mounts/, mirroring the in-container
       # paths (and the chart's PVC subPaths).
-      - ./container_mounts/home/claude/.claude.json:/home/claude/.claude.json
+      # .claude.json now lives inside ~/.claude (CLAUDE_CONFIG_DIR, issue #4) so
+      # atomic saves work; no separate ~/.claude.json bind needed.
       - ./container_mounts/home/claude/.claude:/home/claude/.claude
       - ./container_mounts/home/claude/.ssh:/home/claude/.ssh
       - ./container_mounts/home/claude/.config/gh:/home/claude/.config/gh
