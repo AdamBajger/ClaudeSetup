@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.6.8"
+LABEL version="0.6.9"
 
 # Layer ordering: most-stable steps first, most-frequently-edited last. Editing
 # any layer invalidates the cache for all layers below it, so config files
@@ -87,7 +87,19 @@ ENV HOME=/home/claude \
     PATH="/home/claude/.local/bin:/home/claude/.cargo/bin:/home/claude/workspaces/bin:${PATH}" \
     USE_BUILTIN_RIPGREP=0 \
     RUSTUP_HOME=/home/claude/.rustup \
-    CARGO_HOME=/home/claude/.cargo
+    CARGO_HOME=/home/claude/.cargo \
+    # uv's standalone CPython builds + cache default to ~/.local/share + ~/.cache
+    # (ephemeral rootfs → wiped on every pod bounce, breaking each project .venv's
+    # interpreter symlink + forcing a full re-download). Point them at the PVC
+    # (~/workspaces) so interpreters + cache survive bounces. (issue #6)
+    UV_PYTHON_INSTALL_DIR=/home/claude/workspaces/.uv/python \
+    UV_CACHE_DIR=/home/claude/workspaces/.uv/cache \
+    # Put .claude.json INSIDE the ~/.claude directory (issue #4). The PVC mounts
+    # ~/.claude as a DIRECTORY, so claude's safe-save (write temp + atomic
+    # rename) works there — unlike the old ~/.claude.json FILE subPath mount,
+    # whose rename target was a mount point → truncate-in-place → torn writes
+    # under concurrent writers. Workers override this per-session for isolation.
+    CLAUDE_CONFIG_DIR=/home/claude/.claude
 WORKDIR /home/claude
 
 # uv (Python toolchain) -> $HOME/.local/bin
@@ -144,12 +156,18 @@ COPY --chown=root:root caveman/ /usr/local/lib/caveman/
 # entrypoint refreshes the Caddyfile each start (web.enabled).
 COPY --chown=root:root caddy/Caddyfile.default /usr/local/share/caddy/Caddyfile.default
 COPY --chown=root:root caddy/webshare /usr/local/bin/webshare
+# webshare-auth: toggle HTTP Basic Auth over all caddy content (caddy.d snippet).
+COPY --chown=root:root caddy/webshare-auth /usr/local/bin/webshare-auth
 
 # Slack channel-monitoring executables (the skill + templates live in skills/).
 COPY --chown=root:root slack-monitor/ /usr/local/lib/slack-monitor/
 
 # YouTrack knowledgebase (articles) REST helper — issues go through the MCP.
 COPY --chown=root:root youtrack/youtrack-kb /usr/local/bin/youtrack-kb
+
+# appctl: supervise long-lived in-pod apps (boot-start, reliable restart, venv
+# rebuild). Entrypoint runs `appctl start-all` on boot.
+COPY --chown=root:root apps/appctl /usr/local/bin/appctl
 
 # Orchestrator (manager-only) SessionStart hook: inject AGENTS.md for the manager
 # (scoped by cwd so workers don't inherit it) + tend the auto-resumed workers.
@@ -158,7 +176,7 @@ COPY --chown=root:root manager-startup.sh /usr/local/lib/claude-hooks/manager-st
 # Entrypoint script.
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0644 /etc/profile.d/claude.sh && \
-    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/youtrack-kb \
+    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/webshare-auth /usr/local/bin/youtrack-kb /usr/local/bin/appctl \
         /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh \
         /usr/local/lib/slack-monitor/slack-lock /usr/local/lib/slack-monitor/slack-cron-reminder.sh \
         /usr/local/lib/claude-hooks/manager-startup.sh

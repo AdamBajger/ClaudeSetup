@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# appctl — supervise long-lived apps that run as host processes inside the pod
+# (e.g. a FastAPI/uvicorn app behind caddy). Solves issue #6:
+#   - starts registered apps on pod boot (entrypoint calls `appctl start-all`),
+#   - restarts reliably: kills by PROCESS GROUP (not fuser, which fails in-pod)
+#     so a held port can't leave a STALE process serving old code,
+#   - waits for the port to actually accept connections before reporting success,
+#   - `uv sync`s first so a bounce-wiped .venv is rebuilt before start (uv's
+#     CPython + cache live on the PVC via UV_PYTHON_INSTALL_DIR/UV_CACHE_DIR).
+#
+# Registry (persists on PVC): ~/workspaces/.apps.json
+#   { "<name>": { "dir": <abs>, "port": <int>, "cmd": <string>,
+#                 "health": <path|"">, "sync": <bool> } }
+# Per-app runtime: ~/workspaces/.apps/<name>/{pgid,log}
+#
+#   appctl add <name> <dir> <port> [--health /path] [--no-sync] -- <cmd...>
+#   appctl start|stop|restart|status <name>
+#   appctl start-all          # boot hook: start every registered app
+#   appctl rm <name>          # stop + unregister (keeps dir)
+#   appctl list               # registry
+#   appctl logs <name> [n]
+set -euo pipefail
+
+WS="/home/claude/workspaces"
+REG="$WS/.apps.json"
+RUN="$WS/.apps"
+mkdir -p "$RUN"
+[ -s "$REG" ] || echo '{}' > "$REG"
+
+die() { echo "appctl: $*" >&2; exit 1; }
+command -v jq >/dev/null || die "jq required"
+
+reg_get()  { jq -r --arg n "$1" --arg k "$2" '.[$n][$k] // empty' "$REG"; }
+reg_has()  { jq -e --arg n "$1" 'has($n)' "$REG" >/dev/null; }
+reg_names(){ jq -r 'keys[]' "$REG"; }
+
+reg_set() { # name dir port cmd health sync
+  local tmp; tmp=$(mktemp)
+  jq --arg n "$1" --arg d "$2" --argjson p "$3" --arg c "$4" --arg h "$5" --argjson s "$6" \
+    '.[$n]={dir:$d,port:$p,cmd:$c,health:$h,sync:$s}' "$REG" > "$tmp" && mv "$tmp" "$REG"
+}
+reg_del() { local tmp; tmp=$(mktemp); jq --arg n "$1" 'del(.[$n])' "$REG" > "$tmp" && mv "$tmp" "$REG"; }
+
+# TCP-bind check without ss/lsof (not installed) — bash /dev/tcp.
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && exec 3>&- 3<&- && return 0 || return 1; }
+
+# Wait until the port accepts connections (and, if a health path is set, returns
+# any HTTP response). Returns 0 on bind, 1 on timeout.
+wait_bind() { # port health timeout
+  local port="$1" health="$2" timeout="${3:-40}" i=0
+  while [ "$i" -lt "$timeout" ]; do
+    if port_open "$port"; then
+      [ -z "$health" ] && return 0
+      local code
+      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$port$health" 2>/dev/null || echo 000)
+      [ "$code" != "000" ] && return 0
+    fi
+    i=$((i+1)); sleep 1
+  done
+  return 1
+}
+
+# Kill an app by its recorded process GROUP (reliable; reaps children too), with
+# a cmd-pattern sweep as a backstop for any stray that re-bound the port.
+stop_one() { # name (quiet if not running)
+  local name="$1" pgf="$RUN/$name/pgid" pgid cmd
+  if [ -f "$pgf" ]; then
+    pgid=$(cat "$pgf" 2>/dev/null || true)
+    if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+      local i=0; while [ "$i" -lt 10 ] && kill -0 -- "-$pgid" 2>/dev/null; do sleep 1; i=$((i+1)); done
+      kill -0 -- "-$pgid" 2>/dev/null && kill -KILL -- "-$pgid" 2>/dev/null || true
+    fi
+    rm -f "$pgf"
+  fi
+  cmd=$(reg_get "$name" cmd)
+  [ -n "$cmd" ] && pkill -f -- "$cmd" 2>/dev/null || true
+}
+
+start_one() { # name
+  local name="$1"
+  reg_has "$name" || die "unknown app: $name (appctl add ... first)"
+  local dir port cmd health sync
+  dir=$(reg_get "$name" dir); port=$(reg_get "$name" port); cmd=$(reg_get "$name" cmd)
+  health=$(reg_get "$name" health); sync=$(reg_get "$name" sync)
+  [ -d "$dir" ] || die "app $name: dir gone: $dir"
+  mkdir -p "$RUN/$name"
+  local log="$RUN/$name/log"
+
+  # Rebuild the venv if this is a uv project (bounce may have wiped the
+  # interpreter; UV_* dirs on the PVC make this fast after the first time).
+  if [ "$sync" = "true" ] && { [ -f "$dir/uv.lock" ] || [ -f "$dir/pyproject.toml" ]; }; then
+    echo "appctl: $name: uv sync..."
+    (cd "$dir" && uv sync) >>"$log" 2>&1 || echo "appctl: $name: uv sync failed (see $log)" >&2
+  fi
+
+  stop_one "$name"   # never leave a stale process holding the port
+
+  echo "appctl: $name: starting -> $cmd (cwd $dir, port $port)"
+  setsid bash -c "cd '$dir' && exec $cmd" </dev/null >>"$log" 2>&1 &
+  local pid=$! pgid
+  pgid=$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' '); [ -n "$pgid" ] || pgid="$pid"
+  echo "$pgid" > "$RUN/$name/pgid"
+
+  if wait_bind "$port" "$health" 40; then
+    echo "appctl: $name: up on :$port (pgid $pgid)"
+  else
+    echo "appctl: $name: FAILED to bind :$port within 40s — see $log" >&2
+    tail -n 20 "$log" >&2 || true
+    return 1
+  fi
+}
+
+status_one() { # name
+  local name="$1" port pgf pgid up="down"
+  port=$(reg_get "$name" port); pgf="$RUN/$name/pgid"
+  pgid=$(cat "$pgf" 2>/dev/null || true)
+  if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then up="proc-alive"; fi
+  port_open "$port" && up="$up,port-open"
+  printf '%-20s port=%-6s pgid=%-8s %s\n' "$name" "$port" "${pgid:--}" "$up"
+}
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  add)
+    name="${1:-}"; dir="${2:-}"; port="${3:-}"; shift 3 2>/dev/null || die "usage: appctl add <name> <dir> <port> [--health /p] [--no-sync] -- <cmd...>"
+    health=""; sync=true
+    while [ $# -gt 0 ]; do case "$1" in
+      --health) health="${2:-}"; shift 2;;
+      --no-sync) sync=false; shift;;
+      --) shift; break;;
+      *) break;;
+    esac; done
+    appcmd="$*"
+    [ -n "$name" ] && [ -n "$dir" ] && [ -n "$port" ] && [ -n "$appcmd" ] || die "usage: appctl add <name> <dir> <port> [--health /p] [--no-sync] -- <cmd...>"
+    dir=$(cd "$dir" && pwd) || die "no such dir: $dir"
+    reg_set "$name" "$dir" "$port" "$appcmd" "$health" "$sync"
+    echo "appctl: registered $name"
+    start_one "$name" ;;
+  start)   name="${1:-}"; [ -n "$name" ] || die "usage: appctl start <name>"; start_one "$name" ;;
+  stop)    name="${1:-}"; [ -n "$name" ] || die "usage: appctl stop <name>"; stop_one "$name"; echo "appctl: $name stopped" ;;
+  restart) name="${1:-}"; [ -n "$name" ] || die "usage: appctl restart <name>"; start_one "$name" ;;
+  start-all)
+    for n in $(reg_names); do start_one "$n" || true; done ;;
+  rm|remove)
+    name="${1:-}"; [ -n "$name" ] || die "usage: appctl rm <name>"; stop_one "$name"; reg_del "$name"; echo "appctl: removed $name" ;;
+  status)
+    if [ $# -ge 1 ]; then status_one "$1"; else
+      [ "$(jq -r 'keys|length' "$REG")" = "0" ] && { echo "(no apps registered)"; exit 0; }
+      for n in $(reg_names); do status_one "$n"; done
+    fi ;;
+  list) jq . "$REG" ;;
+  logs)
+    name="${1:-}"; n="${2:-40}"; [ -n "$name" ] || die "usage: appctl logs <name> [n]"; tail -n "$n" "$RUN/$name/log" 2>/dev/null || echo "(no log)" ;;
+  *) die "usage: appctl add|start|stop|restart|status|start-all|rm|list|logs ..." ;;
+esac

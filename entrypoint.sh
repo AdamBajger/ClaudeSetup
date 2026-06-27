@@ -20,8 +20,17 @@ AUTH_KEYS_FILE="$CLAUDE_HOME/.ssh/authorized_keys"
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 
 # 0. Data bootstrap
-mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces"
-CJSON="$CLAUDE_HOME/.claude.json"
+mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces" \
+         "$CLAUDE_HOME/workspaces/.uv" "$CLAUDE_HOME/workspaces/.apps"
+# .claude.json lives inside CLAUDE_CONFIG_DIR (default ~/.claude) so atomic saves
+# work on the PVC dir mount (issue #4). Migrate the legacy ~/.claude.json once.
+CFGDIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME/.claude}"
+mkdir -p "$CFGDIR"
+CJSON="$CFGDIR/.claude.json"
+if [ -f "$CLAUDE_HOME/.claude.json" ] && [ ! -L "$CLAUDE_HOME/.claude.json" ] && [ ! -e "$CJSON" ]; then
+    cp "$CLAUDE_HOME/.claude.json" "$CJSON" 2>/dev/null || true
+    log "migrated legacy ~/.claude.json -> $CJSON"
+fi
 if [ ! -s "$CJSON" ] || [ "$(cat "$CJSON" 2>/dev/null)" = '{}' ]; then
     printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJSON"
 fi
@@ -95,21 +104,21 @@ fi
 
 # 5. Pre-accept the workspace trust dialog. Trust is separate from
 #    --dangerously-skip-permissions with no env bypass; only route is the
-#    per-project flag in ~/.claude.json. jq merge, runs before claude launches.
-CLAUDE_JSON="$CLAUDE_HOME/.claude.json"
+#    per-project flag in .claude.json. jq merge, runs before claude launches.
+CLAUDE_JSON="$CJSON"
 WORKDIR="$CLAUDE_HOME/workspaces"
 [ -s "$CLAUDE_JSON" ] || printf '{}\n' > "$CLAUDE_JSON"
-# Write in place (cat >) not mv: ~/.claude.json is a subPath bind-mount → rename
-# fails "Device or resource busy".
 tmp=$(mktemp)
 if jq --arg d "$WORKDIR" \
       '.projects[$d].hasTrustDialogAccepted = true' "$CLAUDE_JSON" > "$tmp"; then
-    cat "$tmp" > "$CLAUDE_JSON"
+    # .claude.json now sits in a directory mount (CLAUDE_CONFIG_DIR) → atomic
+    # rename works (issue #4); no more truncate-in-place.
+    mv "$tmp" "$CLAUDE_JSON"
     log "trust dialog pre-accepted for $WORKDIR"
 else
     log "WARNING: could not pre-accept trust dialog (jq failed?)"
+    rm -f "$tmp"
 fi
-rm -f "$tmp"
 
 # 6. Seed skills + orchestrator AGENTS.md from the image (one source for compose
 #    and k8s; add a skill = drop a dir under skills/). Skills overwrite every
@@ -282,6 +291,16 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     # from files (AGENTS.md hook, worker registry). No resume picker for the manager.
     tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$CLAUDE_HOME/workspaces" "$CLAUDE_AUTOSTART_CLAUDE_COMMAND" \
         || log "WARNING: tmux session start failed"
+fi
+
+# 11b. Start supervised apps (issue #6): boot-start registered long-lived apps
+#      (FastAPI/uvicorn etc, fronted by caddy). Background — uv sync can be slow
+#      on a cold PVC. appctl rebuilds each .venv first and waits for the port.
+APPS_REG="$CLAUDE_HOME/workspaces/.apps.json"
+if [ -s "$APPS_REG" ] && command -v appctl >/dev/null 2>&1 \
+   && [ "$(jq -r 'keys|length' "$APPS_REG" 2>/dev/null || echo 0)" != "0" ]; then
+    log "starting supervised apps from registry (background; see ~/workspaces/.apps/boot.log)"
+    setsid sh -c 'appctl start-all >>"$HOME/workspaces/.apps/boot.log" 2>&1' </dev/null >/dev/null 2>&1 &
 fi
 
 # 11. Resume registered worker sessions (token-free, via resume-worker). We do NOT

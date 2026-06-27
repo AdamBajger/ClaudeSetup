@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# webshare-auth — toggle HTTP Basic Auth in front of ALL caddy-served content
+# (webshare dirs + proxied apps). Writes a caddy.d snippet (persists on the PVC)
+# and live-reloads caddy — no pod restart. User is fixed to "admin".
+#
+#   webshare-auth set <password>   enable / change password (live)
+#   webshare-auth off              disable auth (live)
+#   webshare-auth status           show current state
+#
+# The Caddyfile is regenerated on every pod start but re-imports caddy.d/*.caddy,
+# so this snippet keeps auth on across restarts. Caddy runs `basic_auth` before
+# file_server/reverse_proxy, so with no matcher it gates every route.
+#
+# NOTE: caddy terminates TLS itself (HTTPS :443) for the public host, so Basic
+# credentials are encrypted on the wire. The password + snippet live ONLY on the
+# PVC, never in git.
+set -euo pipefail
+
+CADDYFILE="/home/claude/workspaces/Caddyfile"
+SNIPPET="/home/claude/workspaces/caddy.d/00-auth.caddy"
+USER_NAME="admin"
+
+reload() {
+  if [ ! -s "$CADDYFILE" ]; then
+    echo "NOTE: $CADDYFILE not found (web disabled?). Snippet written; it applies on next start." >&2
+    return 0
+  fi
+  caddy reload --config "$CADDYFILE" --adapter caddyfile 2>/dev/null \
+    && echo "caddy reloaded." \
+    || { echo "ERROR: caddy reload failed; auth NOT live (snippet on disk though)." >&2; exit 1; }
+}
+
+case "${1:-status}" in
+  set)
+    pw="${2:-}"; [ -n "$pw" ] || { echo "usage: webshare-auth set <password>" >&2; exit 2; }
+    hash=$(caddy hash-password --plaintext "$pw")
+    mkdir -p "$(dirname "$SNIPPET")"
+    cat > "$SNIPPET" <<EOF
+# Managed by webshare-auth. HTTP Basic Auth over ALL caddy content.
+# Edit via: webshare-auth set <password> | webshare-auth off
+basic_auth {
+	$USER_NAME $hash
+}
+EOF
+    echo "auth ON  — user: $USER_NAME  (password set)"
+    reload ;;
+  off|disable|rm)
+    rm -f "$SNIPPET"
+    echo "auth OFF — snippet removed."
+    reload ;;
+  status|"")
+    if [ -f "$SNIPPET" ]; then
+      echo "auth ON  — user: $USER_NAME  (snippet: $SNIPPET)"
+    else
+      echo "auth OFF — no snippet."
+    fi ;;
+  *) echo "usage: webshare-auth set <password> | off | status" >&2; exit 2 ;;
+esac
