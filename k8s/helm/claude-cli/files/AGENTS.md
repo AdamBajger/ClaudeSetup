@@ -44,6 +44,17 @@ below. If they predate these rules, regenerate them.
    longer reliably printed in the pane. Try to capture it; if empty, register with
    `session:""` (placeholder) and STILL write the dispatch — never exit before
    register. Source the URL later from the web UI session list when needed.
+4. **resume-worker must reuse the SAME `CLAUDE_CONFIG_DIR` and resume by exact id.**
+   A worker's transcript lives under its own config dir (`$DIR/.claudecfg/projects/…`),
+   so resume MUST launch with `CLAUDE_CONFIG_DIR=$DIR/.claudecfg` (re-create the
+   creds symlink first) — otherwise claude sees an empty config, finds no session,
+   and drops to onboarding/a fresh convo. Resume by the registry's saved id
+   (`claude -r <session>`) to skip the picker entirely; only fall back to `-c`
+   (continue latest in cwd) if no id is stored, and to the `--resume` picker never.
+5. **resume-worker never exits silently.** If the ready poll times out, leave the
+   tmux session running (claude may be at a modal) and print a clear non-zero
+   status naming the worker, so the boot log and I can see which workers need a
+   manual reconcile. Recreate the helper from this spec if it predates these rules.
 
 ## Env facts
 - claude `/home/claude/.local/bin/claude` v2.1.160. Auth `~/.claude/.credentials.json` (auto, NO `ANTHROPIC_API_KEY`).
@@ -101,14 +112,28 @@ NFS PVC survives, rootfs ephemeral.
 - Slack monitors: crons session-only → die on reinstall. Registry `.slack_monitors.json` survives; `_slack-cron-reminder.sh` startup hook reminds. Re-arm: `CronList`; per registered monitor missing its `[scheduled: <name>]` job → `CronCreate(cron, recurring=true)` from exact `prompt_file` (resets 7-day expiry). New monitors: skill `enable-slack-channel-monitoring`.
 On restart (entrypoint, no action needed): **I (manager) start FRESH** — no chat
 history; I reconstruct state from files (this AGENTS.md, `.workers.json`, the
-SessionStart hooks). The entrypoint resumes every worker in `.workers.json` (their
-project work IS stateful) via `resume-worker`; a SessionStart hook then tells me
-to read each worker's pane and resolve its resume picker / continue only if it was
-interrupted. So keep all durable state in files, never in my chat. Manual fallback:
+SessionStart hooks). So keep all durable state in files, never in my chat.
+
+### Revive workers after a bounce — RECONCILE, don't assume (this is the usual failure)
+When workers/apps are registered, the entrypoint dispatches a boot prompt to me on
+startup telling me to reconcile (and it SKIPS its own background resume so we don't
+race on the same tmux session — revival is mine to own). It also injects the
+reconcile checklist via the manager-startup SessionStart hook. So on every wake,
+run the loop below — don't wait to be asked. Per registered worker:
 ```
-list-workers                 # check; RC URLs stale until resumed
-resume-worker <name>         # same convo, new URL (--id for exact session)
+claude agents --json                 # is a claude live for ~/workspaces/<name>?
+tmux has-session -t <name>           # does its pane exist?
+# missing / dead pane      -> resume-worker <name>   (recreate; wait ~10s)
+read-worker <name>                   # then clear what's on screen:
+#   resume 'summary vs full' picker  -> 2 if interrupted mid-task, else 1 (digit, sleep 1, Enter)
+#   trust dialog                     -> accept;  onboarding/login modal -> config corrupt (issue #4): recover + flag
+#   ❯ idle                           -> tell-worker <name> to continue IF interrupted; else leave
+read-worker <name>                   # VERIFY: must show /rc active or the convo, not a modal/empty
+# still stuck -> resume-worker <name> once more -> still stuck -> gh issue
 ```
+Do this for EVERY registered worker, not just ones with a visible pane — a worker
+the entrypoint failed to start has no pane and is easy to miss. Then reconcile apps
+(`appctl status`; `appctl restart <name>` for any 502/stale).
 
 ## claude flags
 - `--remote-control [name]` — app-steerable; prints `claude.ai/code/session_…` URL = human channel.

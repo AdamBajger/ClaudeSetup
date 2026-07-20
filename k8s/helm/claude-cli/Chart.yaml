@@ -2,8 +2,8 @@ apiVersion: v2
 name: claude-cli
 description: Pre-built Claude Code dev environment with SSH access
 type: application
-version: 0.3.1
-appVersion: "0.6.9"
+version: 0.3.2
+appVersion: "0.6.10"
 home: https://github.com/adambajger/claurst
 sources:
   - https://github.com/adambajger/claurst
