@@ -13,6 +13,16 @@
 #  6. Seed skills + orchestrator AGENTS.md.   12. exec CMD (sshd -D -e default).
 set -eu
 
+# The claude CLI self-updates at runtime: it downloads a new binary into
+# ~/.local/share/claude/versions and flips the ~/.local/bin/claude symlink,
+# which kills the sessions running off the old binary (manager tmux + every
+# worker). Observed 2026-09-11 13:55: 2.1.268 landed, the aigopath worker pane
+# died 2s earlier; evidence in ~/.claude/.last-update-result.json. Pin the
+# binary for the pod's lifetime — update deliberately by rebuilding the image
+# (--build-arg CLAUDE_CACHE_BUST=<new value>).
+DISABLE_AUTOUPDATER=1
+export DISABLE_AUTOUPDATER
+
 CLAUDE_HOME=/home/claude
 SSH_KEYDIR="$CLAUDE_HOME/.ssh/host-keys"
 AUTH_KEYS_FILE="$CLAUDE_HOME/.ssh/authorized_keys"
@@ -80,6 +90,7 @@ write_export() {
 }
 write_export GH_TOKEN
 write_export HF_TOKEN
+write_export DISABLE_AUTOUPDATER
 
 # 4. GitHub CLI auth
 if [ -n "${GH_TOKEN:-}" ]; then
@@ -96,19 +107,36 @@ fi
 # 5. Pre-accept the workspace trust dialog. Trust is separate from
 #    --dangerously-skip-permissions with no env bypass; only route is the
 #    per-project flag in ~/.claude.json. jq merge, runs before claude launches.
+#    Covers the manager workspace AND every registered worker dir — a worker
+#    resumed in ~/workspaces/<name> is a distinct "project" and needs its own
+#    flag, else its pane sits on the dialog and never activates remote control.
+#    NOT covered here: the second, newer gate — the dangerous-settings
+#    disclosure ("This folder pre-approves N tool permissions", added between
+#    2.1.195 and 2.1.268). Its consent is not persisted in any config file, so
+#    it cannot be pre-seeded; bin/_trust-guard answers it per pane instead, and
+#    project .claude/settings.json files should avoid dangerous allow-patterns
+#    like Bash(rm -rf ...) that arm it in the first place.
 CLAUDE_JSON="$CLAUDE_HOME/.claude.json"
 WORKDIR="$CLAUDE_HOME/workspaces"
 [ -s "$CLAUDE_JSON" ] || printf '{}\n' > "$CLAUDE_JSON"
+TRUST_DIRS="$WORKDIR"
+WREG="$WORKDIR/.workers.json"
+if [ -s "$WREG" ] && command -v jq >/dev/null 2>&1; then
+    # Worker dirs are ~/workspaces/<name> — no spaces, safe to word-split.
+    TRUST_DIRS="$TRUST_DIRS $(jq -r '.[].dir // empty' "$WREG" 2>/dev/null | tr '\n' ' ')"
+fi
 # Write in place (cat >) not mv: ~/.claude.json is a subPath bind-mount → rename
 # fails "Device or resource busy".
 tmp=$(mktemp)
-if jq --arg d "$WORKDIR" \
-      '.projects[$d].hasTrustDialogAccepted = true' "$CLAUDE_JSON" > "$tmp"; then
-    cat "$tmp" > "$CLAUDE_JSON"
-    log "trust dialog pre-accepted for $WORKDIR"
-else
-    log "WARNING: could not pre-accept trust dialog (jq failed?)"
-fi
+for d in $TRUST_DIRS; do
+    if jq --arg d "$d" \
+          '.projects[$d].hasTrustDialogAccepted = true' "$CLAUDE_JSON" > "$tmp"; then
+        cat "$tmp" > "$CLAUDE_JSON"
+        log "trust dialog pre-accepted for $d"
+    else
+        log "WARNING: could not pre-accept trust dialog for $d (jq failed?)"
+    fi
+done
 rm -f "$tmp"
 
 # 6. Seed skills + orchestrator AGENTS.md from the image (one source for compose
@@ -224,6 +252,22 @@ if [ -d "$SLACKLIB" ]; then
     rm -f "$tmp"
 fi
 
+# 8c. Worker trust-dialog guard. Installed to ~/workspaces/bin/_trust-guard and
+#     used by step 11 + the spawn-worker/resume-worker helpers: answers the
+#     folder-trust and dangerous-settings dialogs on a worker pane so an
+#     auto-resumed worker reaches its prompt unattended. Refreshed every start
+#     (image is source of truth).
+WTOOLS=/usr/local/lib/worker-tools
+if [ -f "$WTOOLS/trust-guard.sh" ]; then
+    mkdir -p "$CLAUDE_HOME/workspaces/bin"
+    if cp "$WTOOLS/trust-guard.sh" "$CLAUDE_HOME/workspaces/bin/_trust-guard" 2>/dev/null; then
+        chmod 0755 "$CLAUDE_HOME/workspaces/bin/_trust-guard" 2>/dev/null || true
+        log "worker trust-guard installed"
+    else
+        log "WARNING: could not install worker trust-guard"
+    fi
+fi
+
 # 9. Optional caddy web server ($CLAUDE_WEB_ENABLED). Serves ONLY
 #    ~/workspaces/.public (symlinks via `webshare`) + ~/workspaces/caddy.d/*.caddy
 #    snippets — never the whole tree. The Caddyfile is GENERATED here each start
@@ -286,16 +330,22 @@ fi
 
 # 11. Resume registered worker sessions (token-free, via resume-worker). We do NOT
 #     answer their pickers here — the orchestrator reads each pane and decides
+#     the rest (resume pickers, mid-task continuation). Trust dialogs ARE
+#     answered here (via _trust-guard): they block the TUI before remote control
+#     activates, so leaving them up presents as a dead worker in the app.
 REG="$CLAUDE_HOME/workspaces/.workers.json"
 RESUME_HELPER="$CLAUDE_HOME/workspaces/bin/resume-worker"
+TRUST_GUARD="$CLAUDE_HOME/workspaces/bin/_trust-guard"
 if [ -s "$REG" ] && [ -x "$RESUME_HELPER" ] && command -v jq >/dev/null 2>&1; then
     log "resuming worker sessions from registry (background; orchestrator will tend them)"
     setsid sh -c '
-        reg="$1"; rh="$2"
+        reg="$1"; rh="$2"; tg="$3"
         for w in $(jq -r "keys[]" "$reg" 2>/dev/null); do
             "$rh" "$w" >/dev/null 2>&1 || true
+            # Idempotent: no-ops in ~0s when no trust dialog is on screen.
+            [ -x "$tg" ] && "$tg" "$w" 45 >/dev/null 2>&1
         done
-    ' _ "$REG" "$RESUME_HELPER" </dev/null >/dev/null 2>&1 &
+    ' _ "$REG" "$RESUME_HELPER" "$TRUST_GUARD" </dev/null >/dev/null 2>&1 &
 fi
 
 # 12. Hand off to CMD.

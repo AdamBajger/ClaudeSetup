@@ -86,3 +86,9 @@ tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
 - Spawn 400x200 (default 80x24 wraps).
 - Startup race: poll ready before send-keys.
 - Worker status sticks "busy" if a background shell runs (e.g. self-matching `pgrep` waiter) → check real OS procs, not just status.
+
+## Startup dialogs + CLI updates (verified v2.1.270, 2026-09-13)
+- Two gates. Folder trust = `.claude.json` `projects[dir].hasTrustDialogAccepted`; entrypoint pre-seeds manager + registered worker dirs. Dangerous-settings disclosure ("folder pre-approves N tool permissions") = consent NOT persisted anywhere → re-prompts every start, blocks the TUI before RC activates (looks like a dead worker in the app). Gate added between 2.1.195 and 2.1.268.
+- Trigger: dangerous allow-patterns in a project `.claude/settings.json` (e.g. `Bash(rm -rf ...)`). Keep them out.
+- `bin/_trust-guard <session> [timeout]` answers it; entrypoint step 11 + `spawn-worker`/`resume-worker` call it. No-op when no dialog is up.
+- CLI self-update swaps the binary and kills running sessions → entrypoint sets `DISABLE_AUTOUPDATER=1`. Update = rebuild image. Check `~/.claude/.last-update-result.json`.
