@@ -23,18 +23,31 @@ names=""
 if [ -n "$names" ]; then
     ctx="$ctx
 
-## On this startup — tend the auto-resumed workers: ${names}
-Entrypoint resumed each worker's tmux session (worker work IS stateful);
-remote-control is live even with a dialog up. For EACH worker, decide from its
-pane (\`read-worker <name>\` / \`tmux capture-pane -t <name> -p\`) — do NOT blindly
-send keys:
-- Workers are ALWAYS continued. On a 'Resume from summary' picker, choose by
-  whether work was interrupted mid-task: interrupted → \`2\` (full as-is, keep
-  context to finish precisely); clean/idle/finished → \`1\` (summary, lighter).
-  Send: \`tmux send-keys -t <name> <1|2>\`, sleep 1, \`tmux send-keys -t <name> Enter\`.
-- At the \`❯\` prompt: only if interrupted mid-task, \`tell-worker <name>\` to
-  continue where it left off; else leave idle.
-Never start new work on a worker. Give slow workers a few seconds, then re-read."
+## On this startup — RECONCILE workers (registered: ${names})
+The entrypoint TRIED to resume each worker, but resumes fail/stall silently
+(stale helper, resume picker, onboarding/trust/login modal, or the session never
+started). Do NOT assume any worker is up. YOU own recovery — drive EACH
+registered worker to a healthy state, re-resuming the ones the entrypoint missed:
+
+1. CHECK LIVE: is there a running claude for it?
+   \`claude agents --json\` (match by cwd \`~/workspaces/<name>\`) AND
+   \`tmux has-session -t <name> 2>/dev/null\`.
+   - No tmux session, OR session exists but no claude running in it (dead pane)
+     → \`resume-worker <name>\` to (re)create it. Wait ~10s for cold start.
+2. UNBLOCK: \`read-worker <name>\` and clear whatever is on screen:
+   - 'Resume from summary vs full' picker → interrupted mid-task → \`2\` (full);
+     clean/idle/finished → \`1\`. Send digit, sleep 1, then Enter (two send-keys).
+   - Trust / 'pre-approves N tool permissions' dialog → \`_trust-guard <name>\`
+     (or accept by hand). Onboarding/login modal → that's a corrupted-config
+     symptom (issue #4): flag an issue AND recover its config, don't just click.
+   - \`❯\` idle → interrupted mid-task? \`tell-worker <name>\` to continue; else leave.
+3. VERIFY (do not skip): after a few seconds \`read-worker <name>\` again — it must
+   show \`/rc active\` (or its live conversation), NOT a modal or empty pane. Still
+   stuck → \`resume-worker <name>\` once more; if still stuck, flag an issue.
+
+Then APPS: \`appctl status\`. start-all runs at boot, but confirm each is up (curl
+its route — not 502); \`appctl restart <name>\` for any stale one.
+Never start NEW work on a worker; only revive/continue what was already running."
 fi
 
 [ -z "$ctx" ] && exit 0
