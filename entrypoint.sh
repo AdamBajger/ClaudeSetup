@@ -20,8 +20,17 @@ AUTH_KEYS_FILE="$CLAUDE_HOME/.ssh/authorized_keys"
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 
 # 0. Data bootstrap
-mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces"
-CJSON="$CLAUDE_HOME/.claude.json"
+mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces" \
+         "$CLAUDE_HOME/workspaces/.uv" "$CLAUDE_HOME/workspaces/.apps"
+# .claude.json lives inside CLAUDE_CONFIG_DIR (default ~/.claude) so atomic saves
+# work on the PVC dir mount (issue #4). Migrate the legacy ~/.claude.json once.
+CFGDIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME/.claude}"
+mkdir -p "$CFGDIR"
+CJSON="$CFGDIR/.claude.json"
+if [ -f "$CLAUDE_HOME/.claude.json" ] && [ ! -L "$CLAUDE_HOME/.claude.json" ] && [ ! -e "$CJSON" ]; then
+    cp "$CLAUDE_HOME/.claude.json" "$CJSON" 2>/dev/null || true
+    log "migrated legacy ~/.claude.json -> $CJSON"
+fi
 if [ ! -s "$CJSON" ] || [ "$(cat "$CJSON" 2>/dev/null)" = '{}' ]; then
     printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJSON"
 fi
@@ -95,21 +104,21 @@ fi
 
 # 5. Pre-accept the workspace trust dialog. Trust is separate from
 #    --dangerously-skip-permissions with no env bypass; only route is the
-#    per-project flag in ~/.claude.json. jq merge, runs before claude launches.
-CLAUDE_JSON="$CLAUDE_HOME/.claude.json"
+#    per-project flag in .claude.json. jq merge, runs before claude launches.
+CLAUDE_JSON="$CJSON"
 WORKDIR="$CLAUDE_HOME/workspaces"
 [ -s "$CLAUDE_JSON" ] || printf '{}\n' > "$CLAUDE_JSON"
-# Write in place (cat >) not mv: ~/.claude.json is a subPath bind-mount → rename
-# fails "Device or resource busy".
 tmp=$(mktemp)
 if jq --arg d "$WORKDIR" \
       '.projects[$d].hasTrustDialogAccepted = true' "$CLAUDE_JSON" > "$tmp"; then
-    cat "$tmp" > "$CLAUDE_JSON"
+    # .claude.json now sits in a directory mount (CLAUDE_CONFIG_DIR) → atomic
+    # rename works (issue #4); no more truncate-in-place.
+    mv "$tmp" "$CLAUDE_JSON"
     log "trust dialog pre-accepted for $WORKDIR"
 else
     log "WARNING: could not pre-accept trust dialog (jq failed?)"
+    rm -f "$tmp"
 fi
-rm -f "$tmp"
 
 # 6. Seed skills + orchestrator AGENTS.md from the image (one source for compose
 #    and k8s; add a skill = drop a dir under skills/). Skills overwrite every
@@ -280,22 +289,65 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     log "network ready after ${n}s (claude.ai HTTP ${code:-none}); starting tmux '$TMUX_SESSION_NAME'"
     # Orchestrator starts FRESH each pod (no --continue): holds no chat state, rebuilds
     # from files (AGENTS.md hook, worker registry). No resume picker for the manager.
-    tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$CLAUDE_HOME/workspaces" "$CLAUDE_AUTOSTART_CLAUDE_COMMAND" \
+    #
+    # If workers/apps are registered, HAND THE MANAGER A BOOT PROMPT so it actually
+    # runs the reconcile at startup instead of idling at ❯ until a human pokes it —
+    # this is what makes stalled workers get revived automatically. The manager
+    # remains remote-controllable afterwards (the prompt is dispatched, then idle).
+    # Prompt text uses NO single quotes (it's wrapped in single quotes below).
+    START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND"
+    have_workers=0; have_apps=0
+    [ -s "$CLAUDE_HOME/workspaces/.workers.json" ] && [ "$(jq -r 'keys|length' "$CLAUDE_HOME/workspaces/.workers.json" 2>/dev/null || echo 0)" != "0" ] && have_workers=1
+    [ -s "$CLAUDE_HOME/workspaces/.apps.json" ]    && [ "$(jq -r 'keys|length' "$CLAUDE_HOME/workspaces/.apps.json" 2>/dev/null || echo 0)" != "0" ] && have_apps=1
+    if [ "$have_workers" = 1 ] || [ "$have_apps" = 1 ]; then
+        # Manager owns worker revival now → skip the step-11 background resume to
+        # avoid two resume-worker runs racing on the same tmux session.
+        MANAGER_RECONCILES=1
+        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per AGENTS.md: for EVERY registered worker in .workers.json check it is live (claude agents --json + tmux has-session); resume-worker any that is missing or stuck, resolve resume/onboarding/trust modals, and verify each shows /rc active. Then check appctl status and restart any stale app. Report a one-line status per worker and app. Do not start new work."
+        START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND '$BOOT_PROMPT'"
+        log "manager boot prompt: auto-reconcile (workers=$have_workers apps=$have_apps)"
+    fi
+    tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$CLAUDE_HOME/workspaces" "$START_CMD" \
         || log "WARNING: tmux session start failed"
 fi
 
+# 11b. Start supervised apps (issue #6): boot-start registered long-lived apps
+#      (FastAPI/uvicorn etc, fronted by caddy). Background — uv sync can be slow
+#      on a cold PVC. appctl rebuilds each .venv first and waits for the port.
+APPS_REG="$CLAUDE_HOME/workspaces/.apps.json"
+if [ -s "$APPS_REG" ] && command -v appctl >/dev/null 2>&1 \
+   && [ "$(jq -r 'keys|length' "$APPS_REG" 2>/dev/null || echo 0)" != "0" ]; then
+    log "starting supervised apps from registry (background; see ~/workspaces/.apps/boot.log)"
+    setsid sh -c 'appctl start-all >>"$HOME/workspaces/.apps/boot.log" 2>&1' </dev/null >/dev/null 2>&1 &
+fi
+
 # 11. Resume registered worker sessions (token-free, via resume-worker). We do NOT
-#     answer their pickers here — the orchestrator reads each pane and decides
+#     answer their pickers here — the orchestrator reconciles each pane and decides.
+#     This is best-effort: resumes can stall (picker/modal) or the helper can be
+#     missing/stale. We log per-worker outcome to a resume log the manager reads,
+#     and the manager-startup hook makes the manager RECONCILE (re-resume anything
+#     that didn't come up) — never rely on this loop alone.
 REG="$CLAUDE_HOME/workspaces/.workers.json"
 RESUME_HELPER="$CLAUDE_HOME/workspaces/bin/resume-worker"
-if [ -s "$REG" ] && [ -x "$RESUME_HELPER" ] && command -v jq >/dev/null 2>&1; then
-    log "resuming worker sessions from registry (background; orchestrator will tend them)"
-    setsid sh -c '
-        reg="$1"; rh="$2"
+RESUME_LOG="$CLAUDE_HOME/workspaces/.workers-resume.log"
+if [ "${MANAGER_RECONCILES:-0}" = 1 ]; then
+    log "worker revival delegated to the manager's boot reconcile (skipping entrypoint auto-resume to avoid races)"
+elif [ -s "$REG" ] && command -v jq >/dev/null 2>&1 \
+   && [ "$(jq -r 'keys|length' "$REG" 2>/dev/null || echo 0)" != "0" ]; then
+    if [ -x "$RESUME_HELPER" ]; then
+        log "resuming workers from registry (background; log ~/workspaces/.workers-resume.log): $(jq -r 'keys|join(" ")' "$REG" 2>/dev/null)"
+        setsid sh -c '
+        reg="$1"; rh="$2"; rl="$3"
+        printf "==== resume run %s ====\n" "$(date -u 2>/dev/null || echo now)" >> "$rl"
         for w in $(jq -r "keys[]" "$reg" 2>/dev/null); do
-            "$rh" "$w" >/dev/null 2>&1 || true
+            if "$rh" "$w" >>"$rl" 2>&1; then echo "[resume] $w: ok" >> "$rl"
+            else echo "[resume] $w: FAILED (manager must reconcile)" >> "$rl"; fi
         done
-    ' _ "$REG" "$RESUME_HELPER" </dev/null >/dev/null 2>&1 &
+        ' _ "$REG" "$RESUME_HELPER" "$RESUME_LOG" </dev/null >/dev/null 2>&1 &
+    else
+        log "WARNING: $RESUME_HELPER missing/not executable — workers NOT auto-resumed. Manager must recreate the helper (per AGENTS.md) and reconcile: $(jq -r 'keys|join(" ")' "$REG" 2>/dev/null)"
+        printf '%s missing — no auto-resume; manager reconcile required\n' "$RESUME_HELPER" >> "$RESUME_LOG"
+    fi
 fi
 
 # 12. Hand off to CMD.
