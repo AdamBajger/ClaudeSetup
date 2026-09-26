@@ -39,7 +39,7 @@ below. If they predate these rules, regenerate them.
    `$CFG` is stable (derived from the fixed worker name) so `-c`/`--resume` stay consistent.
 2. **Ready poll matches new + old status (issue #2).** claude v2.1.177 prints
    `/rc active`, older prints `Remote Control active`:
-   `tmux capture-pane -t "$NAME" -p | grep -Eq '/rc active|Remote Control active'`.
+   `tmux capture-pane -t "$NAME" -p | grep -Eq '/remote-control is active|/rc active|Remote Control active'`.
 3. **Never skip register on URL-capture failure (issue #2).** The session URL is no
    longer reliably printed in the pane. Try to capture it; if empty, register with
    `session:""` (placeholder) and STILL write the dispatch — never exit before
@@ -157,7 +157,7 @@ tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
 ```
 - No prompt arg = idle at `❯`; append quoted task to dispatch on start.
 - Ready poll (before send-keys, ~10-12s cold), match new + old (issue #2):
-  `tmux capture-pane -t "$NAME" -p | grep -Eq '/rc active|Remote Control active'`.
+  `tmux capture-pane -t "$NAME" -p | grep -Eq '/remote-control is active|/rc active|Remote Control active'`.
 - URL: `tmux capture-pane -t "$NAME" -p | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | head -1`. Often empty (v2.1.177 doesn't reprint it) → register anyway with `session:""`, get the URL from the web UI session list later.
 - Send: text, sleep 1, Enter (two send-keys; separate Enter submits reliably).
 
@@ -174,8 +174,10 @@ tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
 - Startup race: poll ready before send-keys.
 - Worker status sticks "busy" if a background shell runs (e.g. self-matching `pgrep` waiter) → check real OS procs, not just status.
 
-## Startup dialogs + CLI updates (verified v2.1.270, 2026-09-13)
+## Startup dialogs + CLI updates (verified v2.1.283, 2026-09-26)
 - Two gates. Folder trust = `.claude.json` `projects[dir].hasTrustDialogAccepted`; entrypoint pre-seeds manager dir (in `~/.claude/.claude.json`) + each registered worker dir (in its own `<dir>/.claudecfg/.claude.json`, and the manager's for legacy helpers). Dangerous-settings disclosure ("folder pre-approves N tool permissions") = consent NOT persisted anywhere → re-prompts every start, blocks the TUI before RC activates (looks like a dead worker in the app). Gate added between 2.1.195 and 2.1.268.
 - Trigger: dangerous allow-patterns in a project `.claude/settings.json` (e.g. `Bash(rm -rf ...)`). Keep them out.
 - `bin/_trust-guard <session> [timeout]` answers it; entrypoint step 11 + `spawn-worker`/`resume-worker` call it (helper requirement 6 — step 11 is skipped when I reconcile, so the helpers MUST). No-op when no dialog is up.
-- CLI self-update swaps the binary and kills running sessions → entrypoint sets `DISABLE_AUTOUPDATER=1`. Update = rebuild image. Check `~/.claude/.last-update-result.json`.
+- CLI self-update swaps the binary and kills running sessions → entrypoint sets `DISABLE_AUTOUPDATER=1`. Update = rebuild image. Check `~/.claude/.last-update-result.json`. Seen again 2026-09-26: 2.1.270 → 2.1.283 (autoupdate still live until this image rebuild lands).
+- Banner text on 2.1.283 is `/remote-control is active · Continue here, on your phone, or at <url>` — NOT `/rc active`. Poll `grep -qE 'Remote Control active|/remote-control is active'` (helper requirement 2); an `/rc active`-only pattern silently never matches and a live worker reads as ready=no. 2.1.283 does reprint the URL on `--resume`.
+- A dead RC link can't be re-attached in place (pane healthy at `❯`, but `~/.claude/sessions/<pid>.json` stale for days and no outbound socket). Restart is the only route — resume the CURRENT session id (newest `*.jsonl` under the worker's projects dir), not `-c`, when another claude (e.g. a VS Code session) is live in the same dir, or `-c` grabs that conversation.

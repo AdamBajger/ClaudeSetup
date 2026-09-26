@@ -51,7 +51,7 @@ while [ "$n" -lt "$TIMEOUT" ]; do
     # No dialog yet: it may still be rendering (cold start ~10-12s). Stop as soon
     # as the session is clearly past startup (RC banner, or the TUI status line /
     # input box of an already-restored session), so a healthy pane costs ~1s.
-    if printf '%s' "$scr" | grep -qE 'Remote Control active|bypass permissions on|for shortcuts|⏵⏵'; then break; fi
+    if printf '%s' "$scr" | grep -qE 'Remote Control active|/remote-control is active|bypass permissions on|for shortcuts|⏵⏵'; then break; fi
     sleep 1
     n=$((n + 1))
 done
