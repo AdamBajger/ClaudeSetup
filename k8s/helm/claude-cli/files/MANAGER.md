@@ -109,7 +109,7 @@ read-worker <name>                   # VERIFY: must show remote-control active o
 # still stuck -> resume-worker <name> once more -> still stuck -> gh issue
 ```
 EVERY registered worker, not just ones with visible pane — worker that failed to start has
-no pane, easy to miss. Then apps: `sv status $SVDIR/*`; route down → read its log, `sv restart <name>` (skill `publish-web-app`).
+no pane, easy to miss. Then apps: `ls $SVDIR` (empty = no apps), per app `sv status <name>`; route down → read its log, `sv restart <name>` (skill `publish-web-app`).
 Dead RC link can't re-attach in place (pane healthy at `❯`, session record stale, no outbound socket)
 → restart via `resume-worker` (derived id, never `-c`).
 

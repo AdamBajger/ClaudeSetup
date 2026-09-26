@@ -288,7 +288,7 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     if [ "$N_WORKERS" != 0 ]; then
         # manager owns revival → step 11 skips resume (no racing resume-worker)
         MANAGER_RECONCILES=1
-        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per MANAGER.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then sv status for apps. Report one-line status per worker and app. Do not start new work."
+        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per MANAGER.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then ls SVDIR and sv status each app. Report one-line status per worker and app. Do not start new work."
         START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND '$BOOT_PROMPT'"
         log "manager boot prompt: auto-reconcile (workers=$N_WORKERS)"
     fi
