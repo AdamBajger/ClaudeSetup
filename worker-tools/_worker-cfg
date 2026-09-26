@@ -1,43 +1,28 @@
 #!/bin/sh
-# _worker-cfg <name> [dir] — prepare and print a worker's private CLAUDE_CONFIG_DIR.
-#
-# Issue #4 / AGENTS.md helper requirement 1: concurrent workers sharing
-# ~/.claude corrupt .claude.json (torn writes under concurrent savers →
-# onboarding-modal hangs). Each worker instead gets <dir>/.claudecfg, which also
-# lives on the PVC, so transcripts survive a pod bounce.
-#
-# The private dir shares what must stay single-source and copies what must not:
-#   .credentials.json  symlink — one OAuth token for every session
-#   skills             symlink — image-seeded, refreshed by the entrypoint
-#   settings.json      copy on first use — hooks (caveman etc.); worker may diverge
-#   .claude.json       seeded — onboarding done + folder trust pre-accepted for its dir
-# Idempotent: safe to call before every launch.
+# _worker-cfg <name> [dir] — prepare + print worker's private CLAUDE_CONFIG_DIR
+# (<dir>/.claudecfg, on PVC). Shared .claude.json → torn writes → onboarding hangs.
+#   .credentials.json  symlink — one OAuth token for all sessions
+#   skills             symlink — image-seeded, refreshed by entrypoint
+#   settings.json      copied once — worker may diverge
+#   .claude.json       seeded — onboarding done + folder trust for its dir
+# Idempotent: call before every launch.
 set -eu
 
 NAME="${1:?usage: _worker-cfg <name> [dir]}"
-WROOT=/home/claude/workspaces
-DIR="${2:-$WROOT/$NAME}"
+DIR="${2:-/home/claude/workspaces/$NAME}"
 SHARED=/home/claude/.claude
 CFG="$DIR/.claudecfg"
 
 mkdir -p "$CFG"
 ln -sfn "$SHARED/.credentials.json" "$CFG/.credentials.json"
-[ -e "$SHARED/skills" ] && ln -sfn "$SHARED/skills" "$CFG/skills"
-[ -f "$CFG/settings.json" ] || cp "$SHARED/settings.json" "$CFG/settings.json" 2>/dev/null || true
+ln -sfn "$SHARED/skills" "$CFG/skills"
+[ -f "$CFG/settings.json" ] || cp "$SHARED/settings.json" "$CFG/settings.json"
 
-# Folder trust is per-project AND per-config-dir, so seeding the shared
-# .claude.json does not cover a worker running on its own config dir.
+# Trust is per-project AND per-config-dir → shared .claude.json doesn't cover worker.
 CJ="$CFG/.claude.json"
 [ -s "$CJ" ] || printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJ"
-if command -v jq >/dev/null 2>&1; then
-    tmp=$(mktemp)
-    if jq --arg d "$DIR" '.hasCompletedOnboarding = true
-                          | .projects[$d].hasTrustDialogAccepted = true' "$CJ" > "$tmp"; then
-        mv "$tmp" "$CJ"
-    else
-        rm -f "$tmp"
-        echo "_worker-cfg: WARNING could not seed trust in $CJ" >&2
-    fi
-fi
+tmp=$(mktemp)
+jq --arg d "$DIR" '.hasCompletedOnboarding = true | .projects[$d].hasTrustDialogAccepted = true' "$CJ" > "$tmp"
+mv "$tmp" "$CJ"
 
 printf '%s\n' "$CFG"

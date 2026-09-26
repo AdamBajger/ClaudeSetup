@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# spawn-worker <name> <repo-url> [initial-task]
-# Clone a repo into ~/workspaces/<name> and start a remote-controlled Claude worker
-# in its own tmux session. Records it in ~/workspaces/.workers.json and prints the
-# claude.ai URL the human uses to steer it. See ~/workspaces/AGENTS.md.
+# spawn-worker <name> <repo-url> [initial-task] — clone into ~/workspaces/<name>,
+# start RC claude worker in own tmux session, register name, print steer URL.
 set -euo pipefail
 NAME="${1:?usage: spawn-worker <name> <repo-url> [initial-task]}"
 REPO="${2:?usage: spawn-worker <name> <repo-url> [initial-task]}"
@@ -13,47 +11,41 @@ WROOT=/home/claude/workspaces
 DIR="$WROOT/$NAME"
 REG="$WROOT/.workers.json"
 
-if tmux has-session -t "$NAME" 2>/dev/null; then
-  echo "worker '$NAME' already has a tmux session; aborting" >&2; exit 1
-fi
+tmux has-session -t "$NAME" 2>/dev/null && { echo "worker '$NAME' already has a tmux session; aborting" >&2; exit 1; }
 
 if [ -d "$DIR/.git" ]; then
   echo "repo already present at $DIR (reusing)"
 else
   echo "cloning $REPO -> $DIR"
-  gh repo clone "$REPO" "$DIR" 2>/dev/null || git clone "$REPO" "$DIR"
+  # gh handles OWNER/REPO + github auth; plain git for other hosts
+  gh repo clone "$REPO" "$DIR" || { echo "gh clone failed, trying git clone" >&2; git clone "$REPO" "$DIR"; }
 fi
 
-# Private config dir per worker (issue #4): concurrent workers writing one
-# shared ~/.claude/.claude.json tear it and hang on an onboarding modal.
 CFG=$("$WROOT/bin/_worker-cfg" "$NAME" "$DIR")
 
-echo "starting remote-control worker in tmux session '$NAME' (200x50, cfg $CFG)"
-tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
+echo "starting remote-control worker in tmux session '$NAME' (400x200, cfg $CFG)"
+tmux new-session -d -s "$NAME" -x 400 -y 200 -c "$DIR" \
   "CLAUDE_CONFIG_DIR='$CFG' claude --remote-control \"$NAME\" --dangerously-skip-permissions"
 
-# answer the startup trust dialogs (folder trust + the non-persisted
-# dangerous-settings disclosure); they block the TUI before RC activates
-"$WROOT/bin/_trust-guard" "$NAME" 45 || true
+"$WROOT/bin/_trust-guard" "$NAME" 45 || echo "WARNING: trust-guard failed for '$NAME'" >&2
 
-# wait for the TUI to come up (~10-12s cold start) before touching it
+# TUI up ~10-12s cold; poll before touching it
+ready=no
 for _ in $(seq 1 40); do
-  tmux capture-pane -t "$NAME" -p 2>/dev/null | grep -qE 'Remote Control active|/remote-control is active' && break
+  if tmux capture-pane -t "$NAME" -p | grep -qE '/remote-control is active|/rc active|Remote Control active'; then ready=yes; break; fi
   sleep 1
 done
+[ "$ready" = yes ] || echo "WARNING: '$NAME' not confirmed RC-active — check: read-worker $NAME" >&2
 
-URL=$(tmux capture-pane -t "$NAME" -p | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | head -1)
+URL=$(tmux capture-pane -t "$NAME" -p | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | head -1 || true)
 
-# Register the NAME ONLY. The registry is the opt-in set of dirs that get a
-# worker — nothing more. dir (~/workspaces/<name>), repo (git remote), session
-# (newest transcript) and the RC URL are all derived where needed; stored copies
-# rot (a stored session id went 4 months stale, issue #10). Registration must
-# never be skipped over a failed URL scrape.
+# Register NAME only (everything else derived). Never skip over failed URL scrape.
 [ -f "$REG" ] || echo '{}' > "$REG"
 tmp=$(mktemp)
-jq --arg n "$NAME" '.[$n]={}' "$REG" > "$tmp" && mv "$tmp" "$REG"
+jq --arg n "$NAME" '.[$n]={}' "$REG" > "$tmp"
+mv "$tmp" "$REG"
 
-echo "worker '$NAME' ready"
+echo "worker '$NAME' registered"
 echo "  dir: $DIR"
 echo "  url: ${URL:-<not found - check: read-worker $NAME>}"
 

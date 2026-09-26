@@ -1,81 +1,69 @@
 #!/usr/bin/env bash
-# resume-worker <name>  — restart a worker by RESUMING its conversation (same
-# session id, full history) in a fresh remote-control tmux session.
-# Use after a pod reinstall, or when a worker's RC link died (it cannot be
-# re-attached in place). For a brand-new conversation, use spawn-worker.
-#
-# The registry (~/workspaces/.workers.json) is a NAME SET — an object whose keys
-# are worker names; values are ignored. Everything else is derived here, because
-# stored copies rot: a stored session id went 4 months stale (issue #10) and a
-# stored URL dies with every restart.
-#   dir     = ~/workspaces/<name>
-#   cfg     = <dir>/.claudecfg   (private CLAUDE_CONFIG_DIR, issue #4)
-#   session = newest session record / transcript under that cfg
+# resume-worker <name> — restart worker in fresh RC tmux session, RESUMING its
+# conversation (same id, full history). After pod bounce or dead RC link (can't
+# re-attach in place). New conversation → spawn-worker.
+# Registry = name set; dir, cfg, session id derived here (stored copies rot).
+# Exit: 0 ready, 1 error, 3 started but not confirmed RC-active (reconcile it).
 set -euo pipefail
 NAME="${1:?usage: resume-worker <name>}"
 WROOT=/home/claude/workspaces
 REG="$WROOT/.workers.json"
 [ -f "$REG" ] || { echo "no registry at $REG" >&2; exit 1; }
-jq -e --arg n "$NAME" 'has($n)' "$REG" >/dev/null 2>&1 \
-  || { echo "no registry entry for '$NAME'" >&2; exit 1; }
+jq -e --arg n "$NAME" 'has($n)' "$REG" >/dev/null || { echo "no registry entry for '$NAME'" >&2; exit 1; }
 DIR="$WROOT/$NAME"
 [ -d "$DIR" ] || { echo "worker dir missing: $DIR" >&2; exit 1; }
 tmux has-session -t "$NAME" 2>/dev/null && { echo "'$NAME' is already running" >&2; exit 1; }
 
-# Private config dir per worker (issue #4); also where its transcripts live.
 CFG=$("$WROOT/bin/_worker-cfg" "$NAME" "$DIR")
-# claude encodes a cwd into its projects dir name by replacing every
-# non-alphanumeric char with '-'.
+# claude encodes cwd → projects dir name: every non-alphanumeric char → '-'
 ENC=$(printf '%s' "$DIR" | sed 's/[^A-Za-z0-9]/-/g')
 
-# Resume by the CURRENT session id. Never `-c`: "latest conversation in cwd"
-# loses to any other claude live in the same dir (e.g. an IDE session) and would
-# silently attach the wrong conversation.
-# 1. Best signal: a session record whose .tmux names THIS worker's tmux session.
-#    Records sit on the PVC, so they outlive a pod bounce. Newest wins.
+# Resume by derived id, never `-c` (latest-in-cwd loses to other live claude in dir,
+# e.g. IDE session → wrong convo). 1: newest session record naming this tmux session.
+shopt -s nullglob
 SID=""
-if ls "$CFG/sessions"/*.json >/dev/null 2>&1; then
+recs=("$CFG/sessions"/*.json)
+if [ ${#recs[@]} -gt 0 ]; then
   SID=$(jq -rs --arg n "$NAME" '[.[] | select((.tmux // "") | startswith($n + ":"))]
-                                | sort_by(.startedAt) | last | .sessionId // empty' \
-        "$CFG/sessions"/*.json 2>/dev/null || true)
+                                | sort_by(.startedAt) | last | .sessionId // empty' "${recs[@]}") \
+    || { echo "WARNING: unreadable session record under $CFG/sessions, falling back to transcripts" >&2; SID=""; }
 fi
-# 2. Fallback: newest transcript under this worker's config dir.
+# 2: newest transcript under this worker's cfg.
 if [ -z "$SID" ]; then
-  SID=$(ls -t "$CFG/projects/$ENC"/*.jsonl 2>/dev/null | head -1 | xargs -r basename | sed 's/\.jsonl$//')
+  transcripts=("$CFG/projects/$ENC"/*.jsonl)
+  if [ ${#transcripts[@]} -gt 0 ]; then
+    SID=$(basename "$(ls -t "${transcripts[@]}" | head -1)" .jsonl)
+  fi
 fi
 
 if [ -n "$SID" ]; then
   echo "resuming '$NAME' by id $SID in $DIR"
   RESUME_ARGS="--resume \"$SID\""
 else
-  echo "resuming '$NAME': no transcript under $CFG, starting a FRESH conversation" >&2
+  echo "resuming '$NAME': no transcript under $CFG, starting FRESH conversation" >&2
   RESUME_ARGS=""
 fi
-tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
+tmux new-session -d -s "$NAME" -x 400 -y 200 -c "$DIR" \
   "CLAUDE_CONFIG_DIR='$CFG' claude $RESUME_ARGS --remote-control \"$NAME\" --dangerously-skip-permissions"
 
-# Answer the startup trust dialogs first — the dangerous-settings disclosure
-# ("folder pre-approves N tool permissions") is NOT persisted in any config, so
-# it re-blocks the TUI (and RC activation) on every resume.
-"$WROOT/bin/_trust-guard" "$NAME" 45 || true
+# Dangerous-settings disclosure not persisted → re-blocks TUI every resume.
+"$WROOT/bin/_trust-guard" "$NAME" 45 || echo "WARNING: trust-guard failed for '$NAME'" >&2
 
 ready=no
 for _ in $(seq 1 40); do
-  if tmux capture-pane -t "$NAME" -p 2>/dev/null | grep -qE 'Remote Control active|/remote-control is active'; then ready=yes; break; fi
+  tmux has-session -t "$NAME" 2>/dev/null || { echo "ERROR: '$NAME' tmux session died during startup" >&2; exit 1; }
+  if tmux capture-pane -t "$NAME" -p | grep -qE '/remote-control is active|/rc active|Remote Control active'; then ready=yes; break; fi
   sleep 1
 done
-# The banner carries the RC URL ("/remote-control is active · Continue here, on
-# your phone, or at <url>"). Print it; do NOT store it — it is dead the moment
-# this session restarts. Authoritative list: claude.ai/code.
-URL=$(tmux capture-pane -t "$NAME" -p -S - 2>/dev/null | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | tail -1 || true)
+# Banner carries RC URL. Print, never store (dead on next restart).
+URL=$(tmux capture-pane -t "$NAME" -p -S - | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | tail -1 || true)
 
 echo "worker '$NAME' resumed (ready=$ready, session ${SID:-new})"
 if [ -n "$URL" ]; then
   echo "  url: $URL"
 else
-  echo "  url: not printed in pane — open it from claude.ai/code by session name"
-  echo "  drive it meanwhile: tell-worker $NAME '<msg>' / read-worker $NAME"
+  echo "  url: not in pane — open from claude.ai/code by session name"
+  echo "  drive meanwhile: tell-worker $NAME '<msg>' / read-worker $NAME"
 fi
-# Never exit non-zero on a timed-out poll alone: the pane may sit at a modal and
-# the manager must still see the worker as present to reconcile it.
+# Timed-out poll: leave session running (may sit at modal) so manager can reconcile.
 [ "$ready" = yes ] || { echo "WARNING: '$NAME' not confirmed RC-active — reconcile it" >&2; exit 3; }

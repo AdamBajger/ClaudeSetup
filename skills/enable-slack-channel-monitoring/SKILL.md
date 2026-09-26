@@ -9,40 +9,39 @@ description: >
   /enable-slack-channel-monitoring.
 ---
 
-Set up a scheduled, self-identifying Slack monitor for ONE channel, bound to ONE project
-dir, managed by a manager session. Monitor wakes on cron, spawns an isolated subagent
-that reads the channel via Slack MCP and replies only when warranted. A SessionHook
-reminds the manager to recreate the cron if missing (7-day expiry, or pod restart).
-Prompt + instructions render from templates, user-customizable per channel/project.
+Scheduled, self-identifying Slack monitor: ONE channel, ONE project dir, owned by manager
+session. Cron wake → isolated subagent reads channel via Slack MCP, replies only when
+warranted. SessionStart hook reminds manager to recreate missing cron (7-day expiry, pod
+restart). Prompt + instructions rendered from templates, customizable per channel/project.
 
-This skill only **registers** a monitor — does not run it.
+Skill only **registers** monitor — does not run it.
 
 ## Preconditions (check first, stop if unmet)
 
-1. **Slack MCP connected** — `mcp__claude_ai_Slack__*` tools exist this session (ToolSearch
-   `slack_read_channel`). Absent → tell user to add the Slack connector on claude.ai and
-   **restart the session** (MCP loads at session start). Don't continue without it.
-2. **You are the manager session** (cwd = `/home/claude/workspaces`); cron + registry are
-   manager-owned. Worker → hand to the manager.
+1. **Slack MCP connected** — `mcp__claude_ai_Slack__*` tools exist (ToolSearch
+   `slack_read_channel`). Absent → tell user add Slack connector on claude.ai +
+   **restart session** (MCP loads at session start). Don't continue.
+2. **You are manager session** (cwd = `/home/claude/workspaces`); cron + registry
+   manager-owned. Worker → hand to manager.
 3. `jq` available; project dir exists under `~/workspaces`.
 4. Templates present at `~/.claude/skills/enable-slack-channel-monitoring/`:
    `SLACK_CRON.md.tmpl`, `slack_cron.prompt.tmpl`. Missing → copy from
    `/usr/local/lib/slack-monitor/`.
 
-## Inputs (gather from user; ask for any missing)
+## Inputs (ask user for any missing)
 
 - `CHANNEL_NAME` — e.g. `#xai-methods-concepts` (display only).
-- `CHANNEL_ID`   — Slack channel id, e.g. `C0663SX30QY` (find via
+- `CHANNEL_ID`   — e.g. `C0663SX30QY` (find via
   `mcp__claude_ai_Slack__slack_search_channels`).
-- `PROJECT_DIR`  — abs path of the project, e.g. `/home/claude/workspaces/zennit-crp`.
-- `WORKER_NAME`  — optional, worker session the monitor nudges for code work; default
+- `PROJECT_DIR`  — abs project path, e.g. `/home/claude/workspaces/zennit-crp`.
+- `WORKER_NAME`  — optional; worker monitor nudges for code work; default
   `$(basename "$PROJECT_DIR")` (spawn-worker convention).
 - `CRON`         — optional, default `7 6-20 * * *` (≈ hourly 08:07–22:07 Prague).
-- `MONITOR_NAME` — optional, default from channel (`slack-<slug>-monitor`).
+- `MONITOR_NAME` — optional, default `slack-<slug>-monitor` from channel.
 
 ## Step 1 — render files + update registry
 
-Fill the variables, run this block (bash `${//}` substitution — safe with slashes/`#`):
+Fill variables, run block (bash `${//}` substitution — safe with slashes/`#`):
 
 ```bash
 set -euo pipefail
@@ -94,24 +93,23 @@ echo "rendered SLACK_CRON.md + $PROMPT_FILE; registered $MONITOR_NAME ($CRON)"
 echo "PROMPT_FILE=$PROMPT_FILE"
 ```
 
-## Step 2 — create the recurring cron
+## Step 2 — create recurring cron
 
-Read the rendered prompt file, create the job (must be the EXACT text):
+Prompt must be EXACT file text:
 
 - Read `"$PROMPT_FILE"`.
 - **CronCreate** with `cron=<CRON>`, `recurring=true`, `prompt=<file contents>`.
-- Verify with **CronList**: a job whose prompt starts with `[scheduled: <MONITOR_NAME>]`
-  exists.
+- Verify via **CronList**: job with prompt starting `[scheduled: <MONITOR_NAME>]` exists.
 
 ## Step 3 — confirm
 
-Report: monitor name, channel, schedule, project dir, cron registered. Remind the user
-they can tailor `"$PROJECT_DIR/SLACK_CRON.md"` (reply triggers, code tree, datasets).
+Report: monitor name, channel, schedule, project dir, cron registered. Remind user to
+tailor `"$PROJECT_DIR/SLACK_CRON.md"` (reply triggers, code tree, datasets).
 
 ## Notes
 
-- Multiple channels: run once per channel — each gets its own monitor name, prompt file,
-  lock (`slack-lock <action> <MONITOR_NAME>`), registry entry.
-- Across pod restarts: the manager-only `_slack-cron-reminder.sh` SessionStart hook
-  re-reads the registry, reminds the manager to recreate any missing cron (7-day expiry).
-- Stop a monitor: delete its CronList job, remove its registry entry, delete `"$PROMPT_FILE"`.
+- Multiple channels: run once per channel — each own monitor name, prompt file, lock
+  (`slack-lock <action> <MONITOR_NAME>`), registry entry.
+- Pod restarts: manager-only `_slack-cron-reminder.sh` SessionStart hook re-reads
+  registry, reminds manager to recreate missing crons.
+- Stop monitor: delete its CronList job, remove registry entry, delete `"$PROMPT_FILE"`.

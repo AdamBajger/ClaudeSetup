@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# youtrack-kb — file-based YouTrack knowledgebase (articles) helper.
-#
-# Articles are NOT exposed by the YouTrack MCP; this wraps the REST API so an
-# agent can download an article to a markdown file, edit it with normal tools,
-# and upload it back. Reads YT_HOST + YT_TOKEN from the environment (the same
-# values the issues MCP is configured from).
+# youtrack-kb — YouTrack knowledgebase articles via REST (MCP lacks articles).
+# Download article to markdown, edit, upload back. Needs YT_HOST + YT_TOKEN.
 #
 #   youtrack-kb get    <idReadable> [file]                     download content -> file (default <idReadable>.md)
 #   youtrack-kb update <idReadable> <file>                     upload file as the article's markdown content
@@ -12,8 +8,7 @@
 #   youtrack-kb delete <idReadable>                            delete the article
 #   youtrack-kb list   [projectShortName]                      list idReadable + summary
 #
-# idReadable is the human id like ON-A-80; the helper resolves YouTrack's
-# internal ids itself so you never juggle them.
+# idReadable = human id (e.g. ON-A-80); internal ids resolved automatically.
 set -euo pipefail
 
 : "${YT_HOST:?set YT_HOST (e.g. https://youtrack.example.com)}"
@@ -66,6 +61,6 @@ case "$cmd" in
         | jq -r '.[] | "\(.idReadable)\t\(.summary)"'
     fi ;;
   ""|-h|--help|help)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) echo "unknown command: $cmd (try: youtrack-kb help)" >&2; exit 2 ;;
 esac

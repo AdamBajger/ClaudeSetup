@@ -33,6 +33,13 @@ steps an existing pod needs; the code itself always describes the current layout
 - Worker helpers are versioned in `worker-tools/`. The entrypoint installs only the
   ones that are **missing**, so a fresh pod or a lost PVC gets working helpers while an
   existing pod keeps its own edits.
+- Fixed: manager boot prompt contained single quotes, which broke the tmux autostart
+  command; `spawn-worker` exited before registering when no URL was in the pane;
+  `resume-worker` exited instead of starting fresh when a worker had no transcripts.
+- Worker tmux window is 400x200.
+- Repo-wide cleanup: history comments dropped, dead guards removed, silent `|| true` /
+  `2>/dev/null` replaced by loud failure or a logged warning. `appctl` health probe no
+  longer reports a dead app as up.
 
 #### Deploying this change
 
@@ -40,17 +47,21 @@ The chart pulls `adambajger/claude-cli-cloud-run:latest`, so a `helm upgrade` al
 changes nothing here — entrypoint, Dockerfile, AGENTS.md and `worker-tools/` all ship
 inside the image. Order:
 
-1. Merge this PR.
-2. Rebuild and push the image. The cache-bust arg also bakes a current CLI, which
-   matters now that the auto-updater is disabled: the image version is the version the
-   pod keeps until the next rebuild.
+1. Rebuild and push the image from the PR head (merge after the boot is verified). The
+   cache-bust arg also bakes a current CLI, which matters now that the auto-updater is
+   disabled: the image version is the version the pod keeps until the next rebuild.
    ```sh
-   docker build -f claude.Dockerfile -t adambajger/claude-cli-cloud-run:latest \
-     --build-arg CLAUDE_CACHE_BUST=$(date +%s) .
+   docker build -f claude.Dockerfile -t adambajger/claude-cli-cloud-run:0.7.0 \
+     -t adambajger/claude-cli-cloud-run:latest --build-arg CLAUDE_CACHE_BUST=$(date +%s) .
+   docker push adambajger/claude-cli-cloud-run:0.7.0
    docker push adambajger/claude-cli-cloud-run:latest
    ```
-3. Run migration step 0 below on the live pod, as late as possible before the restart.
-4. `helm upgrade --install claude k8s/helm/claude-cli -n <ns> -f k8s/helm/claude-cli/values.yaml`
+2. Run migration step 0 below on the live pod, as late as possible before the restart.
+3. `helm upgrade --install claude k8s/helm/claude-cli -n <ns> -f k8s/helm/claude-cli/values.yaml`,
+   then `kubectl -n <ns> rollout restart deploy/claude-claude-cli` — with an unchanged
+   `latest` tag and manifest, helm alone does not restart the pod.
+4. Migration step 4 below (helper refresh).
+5. Merge this PR.
 
 Expected on boot: trust pre-accepted for `~/workspaces` and every registered worker dir
 (shared + private configs), missing helpers seeded, the RECONCILE prompt dispatched to
@@ -116,4 +127,12 @@ step to repeat immediately before the restart.
    before resuming it — `resume-worker` refuses while the session exists:
    ```sh
    tmux kill-session -t <name> && resume-worker <name>
+   ```
+4. Refresh the pod's helper copies (the entrypoint never overwrites existing ones, and
+   the copies installed on 2026-09-26 carry the spawn/resume bugs fixed above). After
+   boot, have the manager run:
+   ```sh
+   for h in _worker-cfg spawn-worker resume-worker list-workers; do
+     cp /usr/local/lib/worker-tools/$h ~/workspaces/bin/$h
+   done
    ```
