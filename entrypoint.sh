@@ -148,8 +148,11 @@ trust_dir() {
 trust_dir "$CJSON" "$WORKDIR"
 WREG="$WORKDIR/.workers.json"
 if [ -s "$WREG" ] && command -v jq >/dev/null 2>&1; then
-    # Worker dirs are ~/workspaces/<name> — no spaces, safe to word-split.
-    for d in $(jq -r '.[].dir // empty' "$WREG" 2>/dev/null); do
+    # The registry is a NAME SET: an object whose keys are worker names, values
+    # ignored (see AGENTS.md). A worker's dir is ~/workspaces/<name>; an explicit
+    # .dir is honoured for legacy entries only. Names have no spaces → safe to
+    # word-split.
+    for d in $(jq -r --arg w "$WORKDIR" 'to_entries[] | (.value.dir // ($w + "/" + .key))' "$WREG" 2>/dev/null); do
         [ -d "$d" ] || continue
         trust_dir "$CJSON" "$d"
         mkdir -p "$d/.claudecfg" && trust_dir "$d/.claudecfg/.claude.json" "$d"

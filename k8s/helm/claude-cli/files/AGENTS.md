@@ -16,12 +16,19 @@ Default reply to "do X in proj Y" = "hand to Y worker?" — not silent complianc
 
 ## Helpers — `~/workspaces/bin/` (on PATH automatically — baked into image ENV + login profile)
 - `spawn-worker <name> <repo-url> [task]` — clone → start RC worker → wait ready → register → print URL → opt dispatch.
-- `resume-worker <name>` — restart worker, `-c` same convo, new URL. `--id` = exact saved session id.
+- `resume-worker <name>` — restart worker, same convo (id derived, see req 4), new URL.
 - `tell-worker <name> <task...>` — send prompt + submit.
 - `read-worker <name> [lines]` — print worker screen.
 - `list-workers` — live claude + tmux sessions + registry.
 - `kill-worker <name>` — end tmux session, drop from registry, keep dir.
-Registry `~/workspaces/.workers.json`: `name → {dir, repo, session, started}`.
+Registry `~/workspaces/.workers.json` = **NAME SET only**: `{"<name>": {}}` — keys are
+worker names, values ignored. It answers exactly one question: which dirs get a worker
+(the boot resume loop, the RECONCILE prompt and trust pre-seeding all iterate `keys`).
+Everything else is DERIVED at use: `dir` = `~/workspaces/<name>` (a legacy `dir` value is
+still honoured), `repo` = `git -C <dir> remote get-url origin`, `session` = see req 4, RC
+URL = pane banner or the claude.ai/code session list. Never store those: a stored session
+id rotted 4 months unnoticed and a stored URL dies at every restart (issue #10). Keep the
+object shape — a bare JSON array breaks every `jq keys[]` reader.
 These helpers are NOT in the setup repo — I author/maintain them here per the spec
 below. If they predate these rules, regenerate them.
 
@@ -41,16 +48,21 @@ below. If they predate these rules, regenerate them.
    `/rc active`, older prints `Remote Control active`:
    `tmux capture-pane -t "$NAME" -p | grep -Eq '/remote-control is active|/rc active|Remote Control active'`.
 3. **Never skip register on URL-capture failure (issue #2).** The session URL is no
-   longer reliably printed in the pane. Try to capture it; if empty, register with
-   `session:""` (placeholder) and STILL write the dispatch — never exit before
+   longer reliably printed in the pane, and is never stored anyway. Print it if
+   scraped; register the NAME and write the dispatch regardless — never exit before
    register. Source the URL later from the web UI session list when needed.
-4. **resume-worker must reuse the SAME `CLAUDE_CONFIG_DIR` and resume by exact id.**
+4. **resume-worker must reuse the SAME `CLAUDE_CONFIG_DIR` and resume by a DERIVED id.**
    A worker's transcript lives under its own config dir (`$DIR/.claudecfg/projects/…`),
    so resume MUST launch with `CLAUDE_CONFIG_DIR=$DIR/.claudecfg` (re-create the
    creds symlink first) — otherwise claude sees an empty config, finds no session,
-   and drops to onboarding/a fresh convo. Resume by the registry's saved id
-   (`claude -r <session>`) to skip the picker entirely; only fall back to `-c`
-   (continue latest in cwd) if no id is stored, and to the `--resume` picker never.
+   and drops to onboarding/a fresh convo. Resolve the id at resume time, in order:
+   (a) newest `sessions/*.json` record whose `.tmux` starts `"<name>:"` — PVC-backed,
+   survives a bounce, and is the only signal that tells a worker apart from an IDE
+   session in the same dir (`.tmux` null, `entrypoint:"claude-vscode"`);
+   (b) newest transcript jsonl for the dir, skipping ids of records with no `.tmux`.
+   Then `claude --resume <id>`. Never `-c`: "latest conversation in cwd" loses to any
+   other claude live in that dir and silently attaches the wrong conversation. Never
+   the `--resume` picker.
 5. **resume-worker never exits silently.** If the ready poll times out, leave the
    tmux session running (claude may be at a modal) and print a clear non-zero
    status naming the worker, so the boot log and I can see which workers need a
