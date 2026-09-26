@@ -79,44 +79,9 @@ gh issue create --repo "$CLAUDE_SETUP_REPO" \
 **Noteworthy** = reproducible helper/env/instruction bug, worker-blocking failure, or anything
 human should act on (setup drift). **Skip** transient/one-off noise.
 
-## Publish HTML online (webshare)
-Workers expose static HTML from OWN project dir via one shared caddy (`webshare` on PATH).
-Only published dirs public; rest of `~/workspaces` private — put ONLY public-safe files in published dir.
-- `webshare add <name> <dir>` → live at `https://claude-bajger.dyn.cloud.e-infra.cz/<name>/`
-  (e.g. `webshare add zviz ~/workspaces/zennit-crp/public`). `webshare list`, `webshare rm <name>`.
-- Live app on port (not static) → drop `~/workspaces/caddy.d/<name>.caddy`:
-  `handle_path /<name>/* { reverse_proxy localhost:<PORT> }`, then
-  `caddy reload --config ~/workspaces/Caddyfile`.
-- Worker can run `webshare add` itself from project dir — or ask me.
-- **Password-gate all caddy content**: `webshare-auth set <password>` (user `admin`, live reload),
-  `webshare-auth off`, `webshare-auth status`. Writes `caddy.d/00-auth.caddy` (PVC → survives
-  restarts). Password ONLY on PVC, never in git.
-
-## Supervise long-lived apps (runit)
-Host-process app (e.g. FastAPI/uvicorn behind caddy) → runit service, never bare `nohup`.
-`runsvdir` (started by entrypoint) watches `$SVDIR` = `~/workspaces/.sv` (PVC): each subdir = one app,
-started ≤5s after creation + every boot, restarted on crash. New app:
-```sh
-d=$SVDIR/<name>; mkdir -p $d/log/main
-cat > $d/run <<'EOF'
-#!/bin/sh
-exec 2>&1
-cd /home/claude/workspaces/<proj>
-exec uv run uvicorn app:app --port <PORT>
-EOF
-printf '#!/bin/sh\nexec curl -s -o /dev/null http://127.0.0.1:<PORT>/\n' > $d/check
-printf '#!/bin/sh\nexec svlogd -tt ./main\n' > $d/log/run
-chmod +x $d/run $d/check $d/log/run
-sleep 6                      # runsvdir rescans ≤5s; sv fails before pickup
-sv -w 60 start <name>        # waits for ./check → "ok:" or "timeout:"
-```
-- `run` must `exec` the server → runit signals it directly, no stray procs. `uv run` syncs `.venv` itself.
-- `check` = health (any HTTP reply). `sv -w N start|restart` waits on it.
-- `sv status|restart|down|up <name>`; stubborn proc → `sv -w 10 force-restart <name>`.
-- Logs (rotated): `tail -f $SVDIR/<name>/log/main/current`.
-- Keep down across boots: `touch $SVDIR/<name>/down`. Remove: `sv -w 10 down <name>`, then
-  `mv $SVDIR/<name> $SVDIR/.<name>` (runsvdir skips dot-dirs), then `rm -rf`.
-- Expose via caddy snippet (see webshare section).
+## Web publishing + long-lived apps
+Skill `publish-web-app` (workers have it too): webshare static dirs, caddy routes, runit-supervised
+app servers (`$SVDIR` = `~/workspaces/.sv`), password gate. Workers publish from own project dir themselves.
 
 ## Persistence across pod reinstall
 NFS PVC survives, rootfs ephemeral.
@@ -144,7 +109,7 @@ read-worker <name>                   # VERIFY: must show remote-control active o
 # still stuck -> resume-worker <name> once more -> still stuck -> gh issue
 ```
 EVERY registered worker, not just ones with visible pane — worker that failed to start has
-no pane, easy to miss. Then apps: `sv status $SVDIR/*`; route 502 → `sv -w 30 restart <name>` + read its log.
+no pane, easy to miss. Then apps: `sv status $SVDIR/*`; route down → read its log, `sv restart <name>` (skill `publish-web-app`).
 Dead RC link can't re-attach in place (pane healthy at `❯`, session record stale, no outbound socket)
 → restart via `resume-worker` (derived id, never `-c`).
 

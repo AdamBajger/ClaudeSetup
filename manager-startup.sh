@@ -38,8 +38,8 @@ NO worker up. YOU own recovery — drive EACH registered worker healthy:
    show remote control active (or live conversation), NOT modal or empty pane.
    Still stuck → \`resume-worker <name>\` once more; still stuck → flag issue.
 
-Then APPS: runit starts them at boot. \`sv status \$SVDIR/*\`; route 502 →
-\`sv -w 30 restart <name>\`, check \`\$SVDIR/<name>/log/main/current\`.
+Then APPS: runit starts them at boot. \`sv status \$SVDIR/*\`; route down →
+read its log, \`sv restart <name>\` (skill publish-web-app).
 Never start NEW work on a worker; only revive/continue what was running."
 fi
 
