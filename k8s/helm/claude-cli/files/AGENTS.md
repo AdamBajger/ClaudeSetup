@@ -3,8 +3,7 @@
 Me = manager. Spawn/watch worker claude sessions, one per repo `~/workspaces/<name>`.
 Worker = `claude --remote-control` in own tmux session. Human steers worker via its
 `claude.ai/code/session_…` URL; manager steers same session via `tmux send-keys`.
-Verified 2026-06-02, claude v2.1.160; spawn/config notes updated for v2.1.177
-(issues #2/#4) — re-verify before trust if the binary moved on again.
+Verified 2026-09-26 against claude v2.1.283 — re-verify before trust if the binary moved on.
 
 ## RULE: orchestrate, don't do project work
 Never edit code/notebooks/docs in a repo — worker owns it (its context, its git).
@@ -24,14 +23,14 @@ Default reply to "do X in proj Y" = "hand to Y worker?" — not silent complianc
 Registry `~/workspaces/.workers.json` = **NAME SET only**: `{"<name>": {}}` — keys are
 worker names, values ignored. It answers exactly one question: which dirs get a worker
 (the boot resume loop, the RECONCILE prompt and trust pre-seeding all iterate `keys`).
-Everything else is DERIVED at use: `dir` = `~/workspaces/<name>` (a legacy `dir` value is
-still honoured), `repo` = `git -C <dir> remote get-url origin`, `session` = see req 4, RC
+Everything else is DERIVED at use: `dir` = `~/workspaces/<name>`,
+`repo` = `git -C <dir> remote get-url origin`, `session` = see req 4, RC
 URL = pane banner or the claude.ai/code session list. Never store those: a stored session
 id rotted 4 months unnoticed and a stored URL dies at every restart (issue #10). Keep the
 object shape — a bare JSON array breaks every `jq keys[]` reader.
 Reference copies live in the setup repo (`worker-tools/`) and the entrypoint installs
 any that are MISSING — never overwriting, so my in-session edits stay authoritative.
-The spec below is what they must satisfy; if a helper predates these rules, regenerate it.
+The spec below is what they must satisfy; regenerate a helper that does not.
 
 ### Helper requirements (spawn-worker / resume-worker) — keep current
 1. **Per-worker config isolation (issue #4).** Each worker MUST run with its own
@@ -43,8 +42,8 @@ The spec below is what they must satisfy; if a helper predates these rules, rege
    `$CFG` is stable (derived from the fixed worker name) so `--resume` stays consistent.
    Consequence: a worker's transcripts, session records and state all live under
    `$CFG`, invisible to the manager's `claude agents --json` — see Coordination.
-2. **Ready poll matches new + old status (issue #2).** claude v2.1.177 prints
-   `/rc active`, older prints `Remote Control active`:
+2. **Ready poll matches every banner wording (issue #2).** v2.1.283 prints `/remote-control is active`, v2.1.177 `/rc active`, older
+   `Remote Control active`:
    `tmux capture-pane -t "$NAME" -p | grep -Eq '/remote-control is active|/rc active|Remote Control active'`.
 3. **Never skip register on URL-capture failure (issue #2).** The session URL is no
    longer reliably printed in the pane, and is never stored anyway. Print it if
@@ -54,21 +53,17 @@ The spec below is what they must satisfy; if a helper predates these rules, rege
    A worker's transcript lives under its own config dir (`$DIR/.claudecfg/projects/…`),
    so resume MUST launch with `CLAUDE_CONFIG_DIR=$DIR/.claudecfg` (via `_worker-cfg`)
    — otherwise claude sees an empty config, finds no session, and drops to
-   onboarding/a fresh convo. A worker predating isolation has its transcript in the
-   SHARED config: copy `~/.claude/projects/<enc>/<id>.jsonl` into `$CFG/projects/<enc>/`
-   on first resume, else `--resume <id>` finds nothing and silently starts fresh.
-   Resolve the id at resume time, in order:
-   (a) newest `sessions/*.json` record whose `.tmux` starts `"<name>:"` — PVC-backed,
-   survives a bounce, and is the only signal that tells a worker apart from an IDE
-   session in the same dir (`.tmux` null, `entrypoint:"claude-vscode"`);
-   (b) newest transcript jsonl for the dir, skipping ids of records with no `.tmux`.
+   onboarding/a fresh convo. Resolve the id at resume time, from that cfg only:
+   (a) newest `$CFG/sessions/*.json` record whose `.tmux` starts `"<name>:"` —
+   PVC-backed, survives a bounce;
+   (b) else newest `$CFG/projects/<enc>/*.jsonl`.
    Then `claude --resume <id>`. Never `-c`: "latest conversation in cwd" loses to any
-   other claude live in that dir and silently attaches the wrong conversation. Never
-   the `--resume` picker.
+   other claude live in that dir (e.g. an IDE session) and silently attaches the
+   wrong conversation. Never the `--resume` picker.
 5. **resume-worker never exits silently.** If the ready poll times out, leave the
    tmux session running (claude may be at a modal) and print a clear non-zero
    status naming the worker, so the boot log and I can see which workers need a
-   manual reconcile. Recreate the helper from this spec if it predates these rules.
+   manual reconcile.
 6. **Answer startup trust dialogs (issue #10).** Right after `tmux new-session`
    (before/while polling ready), run `_trust-guard "$NAME" 45` — it answers only
    the folder-trust / dangerous-settings dialogs and no-ops otherwise. Without
@@ -76,7 +71,7 @@ The spec below is what they must satisfy; if a helper predates these rules, rege
    `"$CFG/.claude.json"` `.projects["$DIR"].hasTrustDialogAccepted=true` too.
 
 ## Env facts
-- claude `/home/claude/.local/bin/claude` v2.1.160. Auth `~/.claude/.credentials.json` (auto, NO `ANTHROPIC_API_KEY`).
+- claude `/home/claude/.local/bin/claude` v2.1.283 (auto-update disabled; rebuild the image to upgrade). Auth `~/.claude/.credentials.json` (auto, NO `ANTHROPIC_API_KEY`).
 - Config dir: `CLAUDE_CONFIG_DIR=~/.claude` (so `.claude.json` lives in the dir mount → atomic saves, issue #4). Workers override it per-session (see helper requirements).
 - gh: authed `AdamBajger` via `GH_TOKEN`, https, reachable. `HF_TOKEN` set.
 - `CLAUDE_SETUP_REPO=AdamBajger/ClaudeSetup` — this pod's setup repo. Issues: `https://github.com/$CLAUDE_SETUP_REPO/issues`. File against it with `gh issue create --repo "$CLAUDE_SETUP_REPO" ...` (see "flag noteworthy errors" below).

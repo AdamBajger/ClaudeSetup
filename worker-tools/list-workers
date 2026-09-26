@@ -4,12 +4,10 @@
 #
 # `claude agents --json` is scoped to $CLAUDE_CONFIG_DIR, and workers run on their
 # own (issue #4), so the manager's view does NOT include them. State comes from
-# each worker's own session records instead: <dir>/.claudecfg/sessions/*.json,
-# falling back to the shared ~/.claude/sessions for pre-isolation workers.
+# each worker's own session records instead: <dir>/.claudecfg/sessions/*.json.
 set -euo pipefail
 WROOT=/home/claude/workspaces
 REG="$WROOT/.workers.json"
-SHARED=/home/claude/.claude
 
 echo "== this config dir's claude sessions (status / cwd / pid) =="
 claude agents --json | jq -r '.[] | "\(.status)\t\(.cwd)\tpid=\(.pid)"'
@@ -21,16 +19,16 @@ echo
 [ -f "$REG" ] || exit 0
 echo "== workers (name / tmux / pid / status / session id) =="
 jq -r 'keys[]' "$REG" | while read -r n; do
-  d="$(jq -r --arg n "$n" '.[$n].dir // empty' "$REG")"; [ -n "$d" ] || d="$WROOT/$n"
+  d="$WROOT/$n"
   tmux has-session -t "$n" 2>/dev/null && t=up || t=MISSING
   # Dead pane = tmux session lingering with nothing alive in it. That masked a
   # dead worker once: resume-worker refuses ("already running") and the boot loop
   # skips it forever, so surface it explicitly.
   [ "$t" = up ] && [ "$(tmux list-panes -t "$n" -F '#{pane_dead}' 2>/dev/null | head -1)" = 1 ] && t=up-DEADPANE
-  # Collect only files that exist: an absent .claudecfg (worker predating issue #4
-  # isolation) would fail the pipeline under `pipefail` and duplicate the row.
+  # Collect only files that exist: a glob that matches nothing fails the pipeline
+  # under `pipefail` and would duplicate the row.
   files=()
-  for p in "$d/.claudecfg/sessions"/*.json "$SHARED/sessions"/*.json; do
+  for p in "$d/.claudecfg/sessions"/*.json; do
     [ -f "$p" ] && files+=("$p")
   done
   rec=$'-\t-\t-'

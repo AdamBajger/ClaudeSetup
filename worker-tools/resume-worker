@@ -8,8 +8,9 @@
 # are worker names; values are ignored. Everything else is derived here, because
 # stored copies rot: a stored session id went 4 months stale (issue #10) and a
 # stored URL dies with every restart.
-#   dir     = ~/workspaces/<name>   (legacy "dir" value honoured if present)
-#   session = newest transcript jsonl for that dir
+#   dir     = ~/workspaces/<name>
+#   cfg     = <dir>/.claudecfg   (private CLAUDE_CONFIG_DIR, issue #4)
+#   session = newest session record / transcript under that cfg
 set -euo pipefail
 NAME="${1:?usage: resume-worker <name>}"
 WROOT=/home/claude/workspaces
@@ -17,66 +18,45 @@ REG="$WROOT/.workers.json"
 [ -f "$REG" ] || { echo "no registry at $REG" >&2; exit 1; }
 jq -e --arg n "$NAME" 'has($n)' "$REG" >/dev/null 2>&1 \
   || { echo "no registry entry for '$NAME'" >&2; exit 1; }
-DIR=$(jq -r --arg n "$NAME" '.[$n].dir // empty' "$REG")   # legacy entries only
-[ -n "$DIR" ] || DIR="$WROOT/$NAME"
+DIR="$WROOT/$NAME"
 [ -d "$DIR" ] || { echo "worker dir missing: $DIR" >&2; exit 1; }
 tmux has-session -t "$NAME" 2>/dev/null && { echo "'$NAME' is already running" >&2; exit 1; }
 
-# Resume by the CURRENT session id, resolved from the newest transcript for this
-# dir. Not `-c`: that means "latest conversation in cwd", which loses to any
-# other claude live in the same dir (e.g. a VS Code session) and would attach
-# the wrong conversation. Transcripts live under the worker's own config dir
-# when it has one, else the shared one; claude encodes the cwd path into the
-# dir name by replacing every non-alphanumeric char with '-'.
-ENC=$(printf '%s' "$DIR" | sed 's/[^A-Za-z0-9]/-/g')
-# Private config dir per worker (issue #4). Prepared before the id lookup so the
-# transcript migration below has somewhere to land.
+# Private config dir per worker (issue #4); also where its transcripts live.
 CFG=$("$WROOT/bin/_worker-cfg" "$NAME" "$DIR")
-SESSDIRS=("$CFG/sessions" /home/claude/.claude/sessions)
+# claude encodes a cwd into its projects dir name by replacing every
+# non-alphanumeric char with '-'.
+ENC=$(printf '%s' "$DIR" | sed 's/[^A-Za-z0-9]/-/g')
 
+# Resume by the CURRENT session id. Never `-c`: "latest conversation in cwd"
+# loses to any other claude live in the same dir (e.g. an IDE session) and would
+# silently attach the wrong conversation.
 # 1. Best signal: a session record whose .tmux names THIS worker's tmux session.
-#    Those records sit on the PVC, so they usually outlive a pod bounce, and they
-#    distinguish a worker from other claude sessions in the same dir (an IDE
-#    session has .tmux null, entrypoint "claude-vscode"). Newest wins.
-SID=$(cat "${SESSDIRS[@]}"/*.json 2>/dev/null \
-      | jq -rs --arg n "$NAME" '[.[] | select((.tmux // "") | startswith($n + ":"))]
-                                | sort_by(.startedAt) | last | .sessionId // empty' 2>/dev/null || true)
-
-# 2. Fallback: newest transcript for this dir, skipping sessions known NOT to be
-#    tmux workers, so an IDE session writing into the same project dir can't win.
-if [ -z "$SID" ]; then
-  EXCL=$(cat "${SESSDIRS[@]}"/*.json 2>/dev/null \
-         | jq -rs '[.[] | select((.tmux // "") == "") | .sessionId] | join("|")' 2>/dev/null || true)
-  for f in $(ls -t "$CFG/projects/$ENC"/*.jsonl \
-                   "/home/claude/.claude/projects/$ENC"/*.jsonl 2>/dev/null); do
-    cand=$(basename "$f" .jsonl)
-    [ -n "$EXCL" ] && printf '%s' "$cand" | grep -qE "^($EXCL)$" && continue
-    SID="$cand"; break
-  done
+#    Records sit on the PVC, so they outlive a pod bounce. Newest wins.
+SID=""
+if ls "$CFG/sessions"/*.json >/dev/null 2>&1; then
+  SID=$(jq -rs --arg n "$NAME" '[.[] | select((.tmux // "") | startswith($n + ":"))]
+                                | sort_by(.startedAt) | last | .sessionId // empty' \
+        "$CFG/sessions"/*.json 2>/dev/null || true)
 fi
+# 2. Fallback: newest transcript under this worker's config dir.
+if [ -z "$SID" ]; then
+  SID=$(ls -t "$CFG/projects/$ENC"/*.jsonl 2>/dev/null | head -1 | xargs -r basename | sed 's/\.jsonl$//')
+fi
+
 if [ -n "$SID" ]; then
-  # Workers that predate the private config dir have their transcript under the
-  # SHARED config. claude only resumes ids it can see in $CLAUDE_CONFIG_DIR, so
-  # copy (never move — the shared copy stays as a fallback) the transcript across
-  # on first resume. Without this the worker silently starts a fresh conversation.
-  if [ ! -f "$CFG/projects/$ENC/$SID.jsonl" ] \
-     && [ -f "/home/claude/.claude/projects/$ENC/$SID.jsonl" ]; then
-    mkdir -p "$CFG/projects/$ENC"
-    cp "/home/claude/.claude/projects/$ENC/$SID.jsonl" "$CFG/projects/$ENC/$SID.jsonl"
-    echo "migrated transcript $SID into $CFG (was in the shared config dir)"
-  fi
   echo "resuming '$NAME' by id $SID in $DIR"
   RESUME_ARGS="--resume \"$SID\""
 else
-  echo "resuming '$NAME': no transcript found, starting a FRESH conversation in $DIR" >&2
+  echo "resuming '$NAME': no transcript under $CFG, starting a FRESH conversation" >&2
   RESUME_ARGS=""
 fi
 tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
   "CLAUDE_CONFIG_DIR='$CFG' claude $RESUME_ARGS --remote-control \"$NAME\" --dangerously-skip-permissions"
 
 # Answer the startup trust dialogs first — the dangerous-settings disclosure
-# ("folder pre-approves N tool permissions") is NOT persisted in ~/.claude.json,
-# so it re-blocks the TUI (and RC activation) on every resume.
+# ("folder pre-approves N tool permissions") is NOT persisted in any config, so
+# it re-blocks the TUI (and RC activation) on every resume.
 "$WROOT/bin/_trust-guard" "$NAME" 45 || true
 
 ready=no
@@ -84,9 +64,9 @@ for _ in $(seq 1 40); do
   if tmux capture-pane -t "$NAME" -p 2>/dev/null | grep -qE 'Remote Control active|/remote-control is active'; then ready=yes; break; fi
   sleep 1
 done
-# 2.1.283 reprints the banner on --resume ("/remote-control is active · Continue
-# here, on your phone, or at <url>") with a fresh URL. Print it; do NOT store it
-# — it is dead the moment this session restarts. Authoritative list: claude.ai/code.
+# The banner carries the RC URL ("/remote-control is active · Continue here, on
+# your phone, or at <url>"). Print it; do NOT store it — it is dead the moment
+# this session restarts. Authoritative list: claude.ai/code.
 URL=$(tmux capture-pane -t "$NAME" -p -S - 2>/dev/null | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | tail -1 || true)
 
 echo "worker '$NAME' resumed (ready=$ready, session ${SID:-new})"

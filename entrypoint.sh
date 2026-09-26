@@ -33,14 +33,10 @@ log() { printf '[entrypoint] %s\n' "$*" >&2; }
 mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces" \
          "$CLAUDE_HOME/workspaces/.uv" "$CLAUDE_HOME/workspaces/.apps"
 # .claude.json lives inside CLAUDE_CONFIG_DIR (default ~/.claude) so atomic saves
-# work on the PVC dir mount (issue #4). Migrate the legacy ~/.claude.json once.
+# work on the PVC dir mount (issue #4).
 CFGDIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME/.claude}"
 mkdir -p "$CFGDIR"
 CJSON="$CFGDIR/.claude.json"
-if [ -f "$CLAUDE_HOME/.claude.json" ] && [ ! -L "$CLAUDE_HOME/.claude.json" ] && [ ! -e "$CJSON" ]; then
-    cp "$CLAUDE_HOME/.claude.json" "$CJSON" 2>/dev/null || true
-    log "migrated legacy ~/.claude.json -> $CJSON"
-fi
 if [ ! -s "$CJSON" ] || [ "$(cat "$CJSON" 2>/dev/null)" = '{}' ]; then
     printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJSON"
 fi
@@ -119,9 +115,10 @@ fi
 #    Covers the manager workspace AND every registered worker dir — a worker
 #    resumed in ~/workspaces/<name> is a distinct "project" and needs its own
 #    flag, else its pane sits on the dialog and never activates remote control.
-#    Workers run with their own CLAUDE_CONFIG_DIR=<dir>/.claudecfg (issue #4),
-#    so their flag is seeded into THAT .claude.json; the manager's copy is also
-#    seeded for workers launched by a helper that predates config isolation.
+#    Workers run with their own CLAUDE_CONFIG_DIR=<dir>/.claudecfg (issue #4), so
+#    their flag is seeded into THAT .claude.json. The manager's copy gets the same
+#    flag, which covers any claude started in a worker dir on the shared config
+#    (an IDE session, or a human shelling in).
 #    NOT covered here: the second, newer gate — the dangerous-settings
 #    disclosure ("This folder pre-approves N tool permissions", added between
 #    2.1.195 and 2.1.268). Its consent is not persisted in any config file, so
@@ -149,10 +146,9 @@ trust_dir "$CJSON" "$WORKDIR"
 WREG="$WORKDIR/.workers.json"
 if [ -s "$WREG" ] && command -v jq >/dev/null 2>&1; then
     # The registry is a NAME SET: an object whose keys are worker names, values
-    # ignored (see AGENTS.md). A worker's dir is ~/workspaces/<name>; an explicit
-    # .dir is honoured for legacy entries only. Names have no spaces → safe to
-    # word-split.
-    for d in $(jq -r --arg w "$WORKDIR" 'to_entries[] | (.value.dir // ($w + "/" + .key))' "$WREG" 2>/dev/null); do
+    # ignored (see AGENTS.md). A worker's dir is ~/workspaces/<name>; names have
+    # no spaces → safe to word-split.
+    for d in $(jq -r --arg w "$WORKDIR" 'keys[] | $w + "/" + .' "$WREG" 2>/dev/null); do
         [ -d "$d" ] || continue
         trust_dir "$CJSON" "$d"
         mkdir -p "$d/.claudecfg" && trust_dir "$d/.claudecfg/.claude.json" "$d"
