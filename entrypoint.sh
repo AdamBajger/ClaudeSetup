@@ -4,7 +4,7 @@
 #  1. SSH host key               8. YouTrack MCP, Slack tools, trust-guard
 #  2. authorized_keys            9. caddy ($CLAUDE_WEB_ENABLED)
 #  3. export tokens to SSH      10. autostart manager in tmux
-#  4. gh auth                   11. start apps, resume workers
+#  4. gh auth                   11. runsvdir (apps), resume workers
 #  5. pre-accept trust dialog   12. exec CMD (sshd -D -e)
 set -eu
 
@@ -49,7 +49,7 @@ settings_merge() {
 
 # 0. Data bootstrap
 mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$WORKDIR" \
-         "$WORKDIR/.uv" "$WORKDIR/.apps" "$BIN"
+         "$WORKDIR/.uv" "$SVDIR" "$BIN"
 # .claude.json inside CLAUDE_CONFIG_DIR dir mount → atomic saves work.
 CFGDIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME/.claude}"
 mkdir -p "$CFGDIR"
@@ -269,8 +269,6 @@ fi
 
 # 10. Autostart manager claude in detached tmux.
 N_WORKERS=$(reg_count "$WREG")
-APPS_REG="$WORKDIR/.apps.json"
-N_APPS=$(reg_count "$APPS_REG")
 if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     TMUX_SESSION_NAME="${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
     # remote-control connect never retries → wait for egress (any HTTP reply
@@ -284,25 +282,23 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     done
     log "network ready after ${n}s (claude.ai HTTP ${code:-none}); starting tmux '$TMUX_SESSION_NAME'"
     # Manager starts fresh (no --continue); state rebuilt from files. With
-    # workers/apps registered, boot prompt makes it reconcile now instead of
+    # workers registered, boot prompt makes it reconcile now instead of
     # idling at ❯. Prompt must contain NO single quotes (wrapped below).
     START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND"
-    if [ "$N_WORKERS" != 0 ] || [ "$N_APPS" != 0 ]; then
+    if [ "$N_WORKERS" != 0 ]; then
         # manager owns revival → step 11 skips resume (no racing resume-worker)
         MANAGER_RECONCILES=1
-        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per MANAGER.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then appctl status, restart any stale app. Report one-line status per worker and app. Do not start new work."
+        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per MANAGER.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then sv status for apps. Report one-line status per worker and app. Do not start new work."
         START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND '$BOOT_PROMPT'"
-        log "manager boot prompt: auto-reconcile (workers=$N_WORKERS apps=$N_APPS)"
+        log "manager boot prompt: auto-reconcile (workers=$N_WORKERS)"
     fi
     tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$WORKDIR" "$START_CMD" \
         || log "WARNING: tmux session start failed"
 fi
 
-# 11a. Boot-start supervised apps. Background: uv sync slow on cold PVC.
-if [ "$N_APPS" != 0 ]; then
-    log "starting supervised apps from registry (background; see ~/workspaces/.apps/boot.log)"
-    setsid sh -c 'appctl start-all >>"$HOME/workspaces/.apps/boot.log" 2>&1' </dev/null >/dev/null 2>&1 &
-fi
+# 11a. runit: every service dir in $SVDIR (PVC) starts now + restarts on crash.
+log "starting runsvdir on $SVDIR"
+setsid runsvdir -P "$SVDIR" </dev/null >/dev/null 2>&1 &
 
 # 11b. Resume workers (token-free, via resume-worker). Pickers left for manager;
 #      trust dialogs answered here (they block /rc → worker looks dead).

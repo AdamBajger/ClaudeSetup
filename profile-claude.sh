@@ -8,3 +8,5 @@ export UV_PYTHON_INSTALL_DIR="/home/claude/workspaces/.uv/python"
 export UV_CACHE_DIR="/home/claude/workspaces/.uv/cache"
 # .claude.json inside ~/.claude dir mount → atomic saves
 export CLAUDE_CONFIG_DIR="/home/claude/.claude"
+# runit service dirs → `sv status <name>`
+export SVDIR="/home/claude/workspaces/.sv"
