@@ -40,23 +40,29 @@ steps an existing pod needs; the code itself always describes the current layout
 - Repo-wide cleanup: history comments dropped, dead guards removed, silent `|| true` /
   `2>/dev/null` replaced by loud failure or a logged warning. `appctl` health probe no
   longer reports a dead app as up.
+- Manager instructions renamed `AGENTS.md` → `MANAGER.md` and no longer copied to the
+  PVC; the manager-startup hook injects them straight from the image. Claude 2.1.283
+  auto-loads `AGENTS.md` from every ancestor dir, so `~/workspaces/AGENTS.md` leaked the
+  orchestrator role into every worker (and reached the manager twice). Copy-if-absent
+  also meant instruction updates never reached an existing pod. Change instructions via
+  the repo, not in-session.
 
 #### Deploying this change
 
 The chart pulls `adambajger/claude-cli-cloud-run:latest`, so a `helm upgrade` alone
-changes nothing here — entrypoint, Dockerfile, AGENTS.md and `worker-tools/` all ship
+changes nothing here — entrypoint, Dockerfile, MANAGER.md and `worker-tools/` all ship
 inside the image. Order:
 
 1. Rebuild and push the image from the PR head (merge after the boot is verified). The
    cache-bust arg also bakes a current CLI, which matters now that the auto-updater is
    disabled: the image version is the version the pod keeps until the next rebuild.
    ```sh
-   docker build -f claude.Dockerfile -t adambajger/claude-cli-cloud-run:0.7.0 \
+   docker build -f claude.Dockerfile -t adambajger/claude-cli-cloud-run:<version> \
      -t adambajger/claude-cli-cloud-run:latest --build-arg CLAUDE_CACHE_BUST=$(date +%s) .
-   docker push adambajger/claude-cli-cloud-run:0.7.0
+   docker push adambajger/claude-cli-cloud-run:<version>
    docker push adambajger/claude-cli-cloud-run:latest
    ```
-2. Run migration step 0 below on the live pod, as late as possible before the restart.
+2. Run migration steps 0 and 5 below on the live pod, as late as possible before the restart.
 3. `helm upgrade --install claude k8s/helm/claude-cli -n <ns> -f k8s/helm/claude-cli/values.yaml`,
    then `kubectl -n <ns> rollout restart deploy/claude-claude-cli` — with an unchanged
    `latest` tag and manifest, helm alone does not restart the pod.
@@ -77,9 +83,8 @@ With a worker registered, revival is the manager's job and the entrypoint skips 
 resume loop, so `~/workspaces/.workers-resume.log` is NOT written on such a boot — look
 for the `worker revival delegated to the manager's boot reconcile` log line instead. The
 log only appears when nothing is registered for the manager to reconcile.
-Not yet exercised anywhere: the entrypoint-driven boot path itself (seeding, reconcile
-prompt, background resume). The helpers were tested from a shell on a live pod, spawn
-and resume both, but this redeploy is the first run of the boot sequence.
+Boot path verified on the live pod with 0.7.0 (2026-09-26): boot prompt → reconcile →
+`resume-worker` → remote control active, no trust dialog.
 
 #### Migration notes
 
@@ -136,3 +141,9 @@ step to repeat immediately before the restart.
      cp /usr/local/lib/worker-tools/$h ~/workspaces/bin/$h
    done
    ```
+5. Move the old seeded `~/workspaces/AGENTS.md` (and any `~/workspaces/CLAUDE.md`) aside
+   before the restart, otherwise workers keep auto-loading it:
+   ```sh
+   mv ~/workspaces/AGENTS.md ~/workspaces/AGENTS.md.bak
+   ```
+   Its in-session edits were folded into `MANAGER.md`; the backup is only for reference.

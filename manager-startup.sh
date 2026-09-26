@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # SessionStart hook, manager only (cwd == ~/workspaces; workers run in subdirs).
-# Hook not ~/workspaces/CLAUDE.md: CLAUDE.md loads from every ancestor dir →
-# would leak orchestrator role into workers.
-# Injects AGENTS.md + reconcile-workers reminder. Always exit 0.
+# Injects image's MANAGER.md + reconcile-workers reminder. Hook, not a file
+# under ~/workspaces: CLAUDE.md/AGENTS.md auto-load from every ancestor dir →
+# would leak orchestrator role into workers. Always exit 0.
 MANAGER_CWD="/home/claude/workspaces"
-AGENTS="$MANAGER_CWD/AGENTS.md"
 REG="$MANAGER_CWD/.workers.json"
 
 cwd=$(jq -r '.cwd // empty')
 [ "${cwd:-$PWD}" != "$MANAGER_CWD" ] && exit 0
 
-ctx=""
-[ -f "$AGENTS" ] && ctx=$(cat "$AGENTS")
+ctx=$(cat /usr/local/share/claude/MANAGER.md)
 
 names=""
 [ -s "$REG" ] && names=$(jq -r 'keys[]' "$REG" | tr '\n' ' ')
@@ -45,6 +43,5 @@ route — not 502); \`appctl restart <name>\` for any stale one.
 Never start NEW work on a worker; only revive/continue what was running."
 fi
 
-[ -z "$ctx" ] && exit 0
 jq -n --arg c "$ctx" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
 exit 0

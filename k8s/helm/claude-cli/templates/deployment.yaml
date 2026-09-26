@@ -70,7 +70,6 @@ spec:
                   printf '%s\n' "$newhash" > /data/claude/.cred-bootstrap-hash
                 fi
               fi
-              # AGENTS.md + skills seeded by image entrypoint, not here.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.7.0"
+LABEL version="0.7.1"
 
 # Layers: stable/slow first, often-edited config last → tweaks skip curl installs.
 
@@ -96,8 +96,8 @@ COPY --chown=claude:claude tmux.conf /home/claude/.tmux.conf
 
 # Seeded by entrypoint to ~/.claude/skills/<name> each start.
 COPY --chown=root:root skills/ /usr/local/share/claude-skills/
-# Seeded to ~/workspaces/AGENTS.md if absent.
-COPY --chown=root:root k8s/helm/claude-cli/files/AGENTS.md /usr/local/share/claude/AGENTS.md
+# Manager instructions; injected by manager-startup hook (never copied to PVC).
+COPY --chown=root:root k8s/helm/claude-cli/files/MANAGER.md /usr/local/share/claude/MANAGER.md
 # Node-free caveman hooks; ruleset from skills/caveman/.
 COPY --chown=root:root caveman/ /usr/local/lib/caveman/
 

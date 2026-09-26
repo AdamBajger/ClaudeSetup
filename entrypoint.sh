@@ -1,6 +1,6 @@
 #!/bin/sh
 # Container entrypoint (compose + k8s). Runs as `claude`. Idempotent.
-#  0. data bootstrap             6. seed skills + AGENTS.md, wire hooks
+#  0. data bootstrap             6. seed skills, wire hooks
 #  1. SSH host key               8. YouTrack MCP, Slack tools, trust-guard
 #  2. authorized_keys            9. caddy ($CLAUDE_WEB_ENABLED)
 #  3. export tokens to SSH      10. autostart manager in tmux
@@ -159,7 +159,7 @@ if [ -s "$WREG" ]; then
 fi
 
 # 6. Seed skills (overwrite each start; image = source of truth; other-named
-#    user skills untouched) + AGENTS.md (only if absent; manager edits it).
+#    user skills untouched).
 SKILLSRC=/usr/local/share/claude-skills
 mkdir -p "$CLAUDE_HOME/.claude/skills"
 for d in "$SKILLSRC"/*/; do
@@ -168,17 +168,12 @@ for d in "$SKILLSRC"/*/; do
     cp -r "$d" "$CLAUDE_HOME/.claude/skills/$name"
 done
 log "seeded skills: $(ls "$SKILLSRC" | tr '\n' ' ')"
-[ -e "$WORKDIR/AGENTS.md" ] || cp /usr/local/share/claude/AGENTS.md "$WORKDIR/AGENTS.md"
-# No ~/workspaces/CLAUDE.md: claude loads CLAUDE.md from every ancestor dir →
-# orchestrator role leaks into workers. AGENTS.md reaches manager via hook (6b).
-# Remove stale managed @AGENTS.md import.
-if [ -f "$WORKDIR/CLAUDE.md" ] && [ "$(cat "$WORKDIR/CLAUDE.md")" = "@AGENTS.md" ]; then
-    rm -f "$WORKDIR/CLAUDE.md"
-fi
 
 [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
 
-# 6b. manager-startup SessionStart hook (cwd-guarded → inert in workers).
+# 6b. manager-startup SessionStart hook: injects image's MANAGER.md (cwd-guarded
+#     → inert in workers). No instructions file under ~/workspaces: claude
+#     auto-loads CLAUDE.md/AGENTS.md from every ancestor dir → would leak into workers.
 settings_merge "manager-startup hook wired" \
     'addhook("SessionStart"; $cmd)' \
     --arg cmd /usr/local/lib/claude-hooks/manager-startup.sh
@@ -227,8 +222,8 @@ if cp "$WTOOLS/trust-guard.sh" "$BIN/_trust-guard" \
 else
     log "WARNING: could not install worker trust-guard"
 fi
-# 8d. Worker helpers = manager-owned (edits in-session, like AGENTS.md) → seed
-#     only missing ones. Fresh pod / lost PVC gets working set; spec in AGENTS.md.
+# 8d. Worker helpers = manager-owned (edits in-session) → seed only missing
+#     ones. Fresh pod / lost PVC gets working set; spec in MANAGER.md.
 seeded=""
 for h in spawn-worker resume-worker tell-worker read-worker list-workers kill-worker _worker-cfg; do
     [ -e "$BIN/$h" ] && continue
@@ -295,7 +290,7 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     if [ "$N_WORKERS" != 0 ] || [ "$N_APPS" != 0 ]; then
         # manager owns revival → step 11 skips resume (no racing resume-worker)
         MANAGER_RECONCILES=1
-        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per AGENTS.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then appctl status, restart any stale app. Report one-line status per worker and app. Do not start new work."
+        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per MANAGER.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then appctl status, restart any stale app. Report one-line status per worker and app. Do not start new work."
         START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND '$BOOT_PROMPT'"
         log "manager boot prompt: auto-reconcile (workers=$N_WORKERS apps=$N_APPS)"
     fi
@@ -330,7 +325,7 @@ elif [ "$N_WORKERS" != 0 ]; then
         done
         ' _ "$WREG" "$RESUME_HELPER" "$BIN/_trust-guard" </dev/null >>"$RESUME_LOG" 2>&1 &
     else
-        log "WARNING: $RESUME_HELPER missing/not executable — workers NOT auto-resumed. Manager must recreate the helper (per AGENTS.md) and reconcile: $(jq -r 'keys|join(" ")' "$WREG")"
+        log "WARNING: $RESUME_HELPER missing/not executable — workers NOT auto-resumed. Manager must recreate the helper (per MANAGER.md) and reconcile: $(jq -r 'keys|join(" ")' "$WREG")"
         printf '%s missing — no auto-resume; manager reconcile required\n' "$RESUME_HELPER" >> "$RESUME_LOG"
     fi
 fi

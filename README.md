@@ -6,7 +6,7 @@ Batteries-included [Claude Code](https://code.claude.com/docs) environment. Same
 
 - **Claude Code (native build)** + `uv`, Rust, `gh`, `jq`, `tmux`, `caddy`, `openssh`. No Node.
 - **Autostarting orchestrator** — long-lived `claude --remote-control` session, coordinates **workers** (one per repo).
-- **Survives restarts** — workers resume conversations; orchestrator starts fresh, re-derives state from worker registry, `AGENTS.md`, SessionStart hooks.
+- **Survives restarts** — workers resume conversations; orchestrator starts fresh, re-derives state from worker registry + `MANAGER.md` (injected by SessionStart hook).
 - **Web publishing** — `caddy` serves chosen dirs; k8s Ingress + cert-manager → `https://<you>.<zone>/...` via `webshare add`.
 - **Integrations** — node-free *caveman* token-compression mode, *Slack channel-monitoring* skill, *YouTrack* issues (MCP) + knowledge base (REST helper).
 - **Rootless + GPU-ready** — unprivileged user; GPU via Helm values.
@@ -90,15 +90,15 @@ Token stale (e.g. refresh token rotated by login elsewhere) → update `CLAUDE_C
 
 One **orchestrator** (manager) coordinates many **workers** (one per repo).
 
-- **Orchestrator** — autostarted tmux session `claude` running `claude --remote-control "<name>"`. **Fresh on every restart** (no `--continue`); no durable chat state, rebuilds from files. Coordinates only, never edits project code. Instructions: `k8s/helm/claude-cli/files/AGENTS.md`.
+- **Orchestrator** — autostarted tmux session `claude` running `claude --remote-control "<name>"`. **Fresh on every restart** (no `--continue`); no durable chat state, rebuilds from files. Coordinates only, never edits project code. Instructions: `k8s/helm/claude-cli/files/MANAGER.md`.
 - **Workers** — one per repo under `~/workspaces/<name>`, own tmux session + remote-control URL + private config dir `<dir>/.claudecfg`. Stateful → resumed by session id on restart.
 - **Helpers** (`~/workspaces/bin`, on `PATH`; source `worker-tools/`, seeded if missing): `spawn-worker`, `resume-worker`, `tell-worker`, `read-worker`, `list-workers`, `kill-worker`. Registry `~/workspaces/.workers.json` = worker name set.
 
 ### Restarts & hooks
 
-- Entrypoint resumes every registered worker session on restart (token-free).
-- **Manager-only `SessionStart` hook** (`manager-startup.sh`, guarded so workers never see it) injects `AGENTS.md` into orchestrator + tells it to tend resumed workers: read each pane, answer "resume from summary?" picker (*as-is* if interrupted, *summary* if clean), continue only interrupted work.
-- Hook, not workspace `CLAUDE.md`: `CLAUDE.md` loads from every parent dir → would leak orchestrator role into workers. Hook scoped to manager's exact cwd.
+- Workers registered → manager gets boot prompt, reconciles each (`resume-worker`, clears modals). No manager autostart → entrypoint resumes them itself.
+- **Manager-only `SessionStart` hook** (`manager-startup.sh`, cwd-guarded) injects image's `MANAGER.md` + reconcile checklist.
+- Hook, not a file under `~/workspaces`: claude auto-loads `CLAUDE.md`/`AGENTS.md` from every parent dir → would leak orchestrator role into workers.
 
 ### Communication
 
@@ -157,7 +157,7 @@ One shared `caddy` publishes selected dirs — never whole workspace.
 | [`entrypoint.sh`](entrypoint.sh) | Per-start setup, shared by Docker and k8s. |
 | [`docker-compose.yml`](docker-compose.yml) / [`.env.example`](.env.example) | Local deployment + config. |
 | [`k8s/helm/claude-cli/`](k8s/helm/claude-cli/) | Helm chart (authoritative); `values.example.yaml` documents every option. |
-| [`k8s/helm/claude-cli/files/AGENTS.md`](k8s/helm/claude-cli/files/AGENTS.md) | Orchestrator operating instructions. |
+| [`k8s/helm/claude-cli/files/MANAGER.md`](k8s/helm/claude-cli/files/MANAGER.md) | Orchestrator operating instructions. |
 | `skills/`, `caddy/`, `slack-monitor/`, `youtrack/`, `caveman/`, `manager-startup.sh` | Baked-in skills, web server config, integrations. |
 
 Config files carry inline comments for every option.

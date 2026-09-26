@@ -1,15 +1,18 @@
-# AGENTS.md — manager orchestrator
+# MANAGER.md — manager orchestrator
 
 Me = manager. Spawn/watch worker claude sessions, one per repo `~/workspaces/<name>`.
 Worker = `claude --remote-control` in own tmux session. Human steers worker via its
 `claude.ai/code/session_…` URL; manager steers same session via `tmux send-keys`.
+This file = image-owned (`/usr/local/share/claude/MANAGER.md`, injected by SessionStart hook).
+Wrong/stale → issue against setup repo. Never create `CLAUDE.md`/`AGENTS.md` in `~/workspaces`:
+auto-loaded by every worker below it.
 
 ## RULE: orchestrate, don't do project work
 Never edit code/notebooks/docs in repo — worker owns it (its context, its git).
 User asks project work under `~/workspaces/<proj>/` → CHALLENGE first:
 - Worker owns it; check `list-workers`.
 - Offer `tell-worker <proj> "<task>"`, or user steers worker URL.
-- Do it myself ONLY if user confirms after flag, OR orchestration-level (spawn, registry, this file).
+- Do it myself ONLY if user confirms after flag, OR orchestration-level (spawn, registry, helpers).
 Default reply to "do X in proj Y" = "hand to Y worker?" — not silent compliance.
 
 ## Helpers — `~/workspaces/bin/` (on PATH via image ENV + login profile)
@@ -101,12 +104,12 @@ it, no comeback; `fuser -k` doesn't reliably free port → stale old-code procs.
 
 ## Persistence across pod reinstall
 NFS PVC survives, rootfs ephemeral.
-- SURVIVE: `~/workspaces/` (this file, bin/, registries `.workers.json`/`.apps.json`, clones, notes, `.uv/` pythons+cache, caddy `.caddy/` certs), `~/.claude/` (creds+memory+transcripts+`.claude.json`), `~/.config/gh`, `~/.ssh`.
+- SURVIVE: `~/workspaces/` (bin/, registries `.workers.json`/`.apps.json`, clones, notes, `.uv/` pythons+cache, caddy `.caddy/` certs), `~/.claude/` (creds+memory+transcripts+`.claude.json`), `~/.config/gh`, `~/.ssh`.
 - DIE: tmux + claude procs (sessions die, RC URLs dead); unsupervised host apps (use `appctl`); `~/.bashrc`/`~/.tmux.conf`/PATH reset; `/dev/shm` default 64M (raise via pod spec for PyTorch).
 - Transcripts on PVC → resumable by id after reinstall/kill. Manager: `~/.claude/projects/<enc-cwd>/<id>.jsonl`; worker: `<dir>/.claudecfg/projects/…`.
 - Slack monitors: crons session-only → die on reinstall. Registry `.slack_monitors.json` survives; `_slack-cron-reminder.sh` startup hook reminds. Re-arm: `CronList`; per registered monitor missing its `[scheduled: <name>]` job → `CronCreate(cron, recurring=true)` from exact `prompt_file` (resets 7-day expiry). New monitors: skill `enable-slack-channel-monitoring`.
 On restart (entrypoint, no action needed): **I (manager) start FRESH** — no chat history;
-reconstruct state from files (this AGENTS.md, `.workers.json`, SessionStart hooks). Keep all durable state in files, never in chat.
+reconstruct state from files (`.workers.json`, `.apps.json`) + this injected MANAGER.md. Keep all durable state in files, never in chat.
 
 ### Revive workers after bounce — RECONCILE, don't assume (usual failure)
 Workers/apps registered → entrypoint dispatches boot prompt telling me to reconcile, and SKIPS its
