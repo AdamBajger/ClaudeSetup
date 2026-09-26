@@ -35,11 +35,11 @@ NO worker up. YOU own recovery — drive EACH registered worker healthy:
      flag issue AND recover its config, don't just click through.
    - \`❯\` idle → interrupted mid-task? \`tell-worker <name>\` to continue; else leave.
 3. VERIFY (never skip): few seconds later \`read-worker <name>\` again — must
-   show \`/rc active\` (or live conversation), NOT modal or empty pane. Still
-   stuck → \`resume-worker <name>\` once more; still stuck → flag issue.
+   show remote control active (or live conversation), NOT modal or empty pane.
+   Still stuck → \`resume-worker <name>\` once more; still stuck → flag issue.
 
-Then APPS: \`appctl status\`. start-all runs at boot; confirm each up (curl its
-route — not 502); \`appctl restart <name>\` for any stale one.
+Then APPS: runit starts them at boot. \`ls \$SVDIR\` (empty = no apps), per app
+\`sv status <name>\`; route down → read its log, \`sv restart <name>\` (skill publish-web-app).
 Never start NEW work on a worker; only revive/continue what was running."
 fi
 

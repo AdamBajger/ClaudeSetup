@@ -114,6 +114,7 @@ Baked in, seeded into `~/.claude/skills/` on start:
 
 - **caveman** — ultra-compressed output mode, cuts tokens, keeps technical accuracy. Node-free. On by default; toggle `/caveman lite|full|ultra|off`.
 - **enable-slack-channel-monitoring** — registers scheduled monitor for one Slack channel tied to one project dir: renders per-channel `SLACK_CRON.md` + cron prompt, records in registry, creates recurring in-session cron that spawns Slack-reading subagent each tick. **Needs Slack connector enabled on Claude account.**
+- **publish-web-app** — publish static dirs (`webshare`) or live apps via caddy; app servers supervised by runit (`~/workspaces/.sv`); password gate.
 - **youtrack** — issues/projects via official **YouTrack MCP** (auto-configured when `youtrack.host` + token set); knowledge-base articles via REST with bundled `youtrack-kb` helper (MCP has no article tools).
 
 ---
@@ -129,7 +130,7 @@ One shared `caddy` publishes selected dirs — never whole workspace.
   webshare rm myviz    # unpublish
   ```
   `webshare` symlinks dir under `~/workspaces/.public/` — the **only** thing caddy serves. Put only public-safe files in published dir.
-- Live app on port (e.g. Streamlit `:8501`): snippet in `~/workspaces/caddy.d/<name>.caddy`:
+- Live app on port (e.g. Streamlit `:8501`): keep it up as a runit service in `~/workspaces/.sv/<name>/` (see [`skills/publish-web-app`](skills/publish-web-app/SKILL.md)), route it with a snippet in `~/workspaces/caddy.d/<name>.caddy`:
   ```
   handle_path /myapp/* { reverse_proxy localhost:8501 }
   ```

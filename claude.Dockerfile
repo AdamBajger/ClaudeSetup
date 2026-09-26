@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.7.1"
+LABEL version="0.8.0"
 
 # Layers: stable/slow first, often-edited config last → tweaks skip curl installs.
 
@@ -15,7 +15,7 @@ LABEL version="0.7.1"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        bash curl ca-certificates less vim ripgrep jq tmux tini \
+        bash curl ca-certificates less vim ripgrep jq tmux tini runit \
         git \
         openssh-server openssh-client \
         build-essential pkg-config \
@@ -66,7 +66,9 @@ ENV HOME=/home/claude \
     UV_PYTHON_INSTALL_DIR=/home/claude/workspaces/.uv/python \
     UV_CACHE_DIR=/home/claude/workspaces/.uv/cache \
     # .claude.json inside ~/.claude dir mount → atomic rename works. Workers override.
-    CLAUDE_CONFIG_DIR=/home/claude/.claude
+    CLAUDE_CONFIG_DIR=/home/claude/.claude \
+    # runit service dirs (PVC); runsvdir started by entrypoint
+    SVDIR=/home/claude/workspaces/.sv
 WORKDIR /home/claude
 
 RUN curl -Ls https://astral.sh/uv/install.sh | sh
@@ -101,7 +103,6 @@ COPY --chown=root:root k8s/helm/claude-cli/files/MANAGER.md /usr/local/share/cla
 # Node-free caveman hooks; ruleset from skills/caveman/.
 COPY --chown=root:root caveman/ /usr/local/lib/caveman/
 
-COPY --chown=root:root caddy/Caddyfile.default /usr/local/share/caddy/Caddyfile.default
 COPY --chown=root:root caddy/webshare /usr/local/bin/webshare
 COPY --chown=root:root caddy/webshare-auth /usr/local/bin/webshare-auth
 
@@ -113,12 +114,11 @@ COPY --chown=root:root worker-tools/ /usr/local/lib/worker-tools/
 
 # YouTrack articles REST helper (issues go via MCP).
 COPY --chown=root:root youtrack/youtrack-kb /usr/local/bin/youtrack-kb
-COPY --chown=root:root apps/appctl /usr/local/bin/appctl
 COPY --chown=root:root manager-startup.sh /usr/local/lib/claude-hooks/manager-startup.sh
 
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0644 /etc/profile.d/claude.sh && \
-    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/webshare-auth /usr/local/bin/youtrack-kb /usr/local/bin/appctl \
+    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/webshare-auth /usr/local/bin/youtrack-kb \
         /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh \
         /usr/local/lib/slack-monitor/slack-lock /usr/local/lib/slack-monitor/slack-cron-reminder.sh \
         /usr/local/lib/worker-tools/* \

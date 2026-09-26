@@ -79,40 +79,21 @@ gh issue create --repo "$CLAUDE_SETUP_REPO" \
 **Noteworthy** = reproducible helper/env/instruction bug, worker-blocking failure, or anything
 human should act on (setup drift). **Skip** transient/one-off noise.
 
-## Publish HTML online (webshare)
-Workers expose static HTML from OWN project dir via one shared caddy (`webshare` on PATH).
-Only published dirs public; rest of `~/workspaces` private — put ONLY public-safe files in published dir.
-- `webshare add <name> <dir>` → live at `https://claude-bajger.dyn.cloud.e-infra.cz/<name>/`
-  (e.g. `webshare add zviz ~/workspaces/zennit-crp/public`). `webshare list`, `webshare rm <name>`.
-- Live app on port (not static) → drop `~/workspaces/caddy.d/<name>.caddy`:
-  `handle_path /<name>/* { reverse_proxy localhost:<PORT> }`, then
-  `caddy reload --config ~/workspaces/Caddyfile`.
-- Worker can run `webshare add` itself from project dir — or ask me.
-- **Password-gate all caddy content**: `webshare-auth set <password>` (user `admin`, live reload),
-  `webshare-auth off`, `webshare-auth status`. Writes `caddy.d/00-auth.caddy` (PVC → survives
-  restarts). Password ONLY on PVC, never in git.
-
-## Supervise long-lived apps (appctl)
-Host-process app (e.g. FastAPI/uvicorn behind caddy) NOT supervised by default: pod bounce kills
-it, no comeback; `fuser -k` doesn't reliably free port → stale old-code procs. Use `appctl`, not bare `nohup uv run ...`:
-- `appctl add <name> <dir> <port> [--health /p] [--no-sync] -- <cmd...>` — register
-  (PVC `~/workspaces/.apps.json`) + start. Auto `uv sync` first (rebuilds bounce-wiped `.venv`;
-  uv data on PVC). Entrypoint runs `appctl start-all` every boot → registered apps auto-return.
-- `appctl restart <name>` — kills previous **process group** (not `fuser`) so no stale proc holds
-  port, then waits for port bind.
-- `appctl status|stop|logs|rm|list`.
+## Web publishing + long-lived apps
+Skill `publish-web-app` (workers have it too): webshare static dirs, caddy routes, runit-supervised
+app servers (`$SVDIR` = `~/workspaces/.sv`), password gate. Workers publish from own project dir themselves.
 
 ## Persistence across pod reinstall
 NFS PVC survives, rootfs ephemeral.
-- SURVIVE: `~/workspaces/` (bin/, registries `.workers.json`/`.apps.json`, clones, notes, `.uv/` pythons+cache, caddy `.caddy/` certs), `~/.claude/` (creds+memory+transcripts+`.claude.json`), `~/.config/gh`, `~/.ssh`.
-- DIE: tmux + claude procs (sessions die, RC URLs dead); unsupervised host apps (use `appctl`); `~/.bashrc`/`~/.tmux.conf`/PATH reset; `/dev/shm` default 64M (raise via pod spec for PyTorch).
+- SURVIVE: `~/workspaces/` (bin/, `.workers.json`, `.sv/` app services, clones, notes, `.uv/` pythons+cache, caddy `.caddy/` certs), `~/.claude/` (creds+memory+transcripts+`.claude.json`), `~/.config/gh`, `~/.ssh`.
+- DIE: tmux + claude procs (sessions die, RC URLs dead); host apps not under runit; `~/.bashrc`/`~/.tmux.conf`/PATH reset; `/dev/shm` default 64M (raise via pod spec for PyTorch).
 - Transcripts on PVC → resumable by id after reinstall/kill. Manager: `~/.claude/projects/<enc-cwd>/<id>.jsonl`; worker: `<dir>/.claudecfg/projects/…`.
 - Slack monitors: crons session-only → die on reinstall. Registry `.slack_monitors.json` survives; `_slack-cron-reminder.sh` startup hook reminds. Re-arm: `CronList`; per registered monitor missing its `[scheduled: <name>]` job → `CronCreate(cron, recurring=true)` from exact `prompt_file` (resets 7-day expiry). New monitors: skill `enable-slack-channel-monitoring`.
 On restart (entrypoint, no action needed): **I (manager) start FRESH** — no chat history;
-reconstruct state from files (`.workers.json`, `.apps.json`) + this injected MANAGER.md. Keep all durable state in files, never in chat.
+reconstruct state from files (`.workers.json`, `.sv/`) + this injected MANAGER.md. Keep all durable state in files, never in chat.
 
 ### Revive workers after bounce — RECONCILE, don't assume (usual failure)
-Workers/apps registered → entrypoint dispatches boot prompt telling me to reconcile, and SKIPS its
+Workers registered → entrypoint dispatches boot prompt telling me to reconcile, and SKIPS its
 own background resume (no race on same tmux session — revival mine). Manager-startup SessionStart
 hook injects this checklist too. Every wake, run loop below unasked. Per registered worker:
 ```
@@ -128,7 +109,7 @@ read-worker <name>                   # VERIFY: must show remote-control active o
 # still stuck -> resume-worker <name> once more -> still stuck -> gh issue
 ```
 EVERY registered worker, not just ones with visible pane — worker that failed to start has
-no pane, easy to miss. Then reconcile apps (`appctl status`; `appctl restart <name>` for any 502/stale).
+no pane, easy to miss. Then apps: `ls $SVDIR` (empty = no apps), per app `sv status <name>`; route down → read its log, `sv restart <name>` (skill `publish-web-app`).
 Dead RC link can't re-attach in place (pane healthy at `❯`, session record stale, no outbound socket)
 → restart via `resume-worker` (derived id, never `-c`).
 
