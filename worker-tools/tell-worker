@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# tell-worker <name> <task...>  — send a prompt to a worker and submit it.
+set -euo pipefail
+NAME="${1:?usage: tell-worker <name> <task...>}"; shift
+MSG="$*"
+[ -n "$MSG" ] || { echo "usage: tell-worker <name> <task...>" >&2; exit 1; }
+tmux has-session -t "$NAME" 2>/dev/null || { echo "no worker '$NAME'" >&2; exit 1; }
+tmux send-keys -t "$NAME" "$MSG"; sleep 1; tmux send-keys -t "$NAME" Enter
+echo "sent to '$NAME': $MSG"

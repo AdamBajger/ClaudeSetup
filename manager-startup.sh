@@ -30,7 +30,8 @@ started). Do NOT assume any worker is up. YOU own recovery — drive EACH
 registered worker to a healthy state, re-resuming the ones the entrypoint missed:
 
 1. CHECK LIVE: is there a running claude for it?
-   \`claude agents --json\` (match by cwd \`~/workspaces/<name>\`) AND
+   \`list-workers\` (workers run on their own CLAUDE_CONFIG_DIR, so the manager's
+   \`claude agents --json\` canNOT see them) AND
    \`tmux has-session -t <name> 2>/dev/null\`.
    - No tmux session, OR session exists but no claude running in it (dead pane)
      → \`resume-worker <name>\` to (re)create it. Wait ~10s for cold start.

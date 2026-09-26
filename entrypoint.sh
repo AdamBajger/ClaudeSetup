@@ -278,14 +278,29 @@ fi
 #     auto-resumed worker reaches its prompt unattended. Refreshed every start
 #     (image is source of truth).
 WTOOLS=/usr/local/lib/worker-tools
+WBIN="$CLAUDE_HOME/workspaces/bin"
 if [ -f "$WTOOLS/trust-guard.sh" ]; then
-    mkdir -p "$CLAUDE_HOME/workspaces/bin"
-    if cp "$WTOOLS/trust-guard.sh" "$CLAUDE_HOME/workspaces/bin/_trust-guard" 2>/dev/null; then
-        chmod 0755 "$CLAUDE_HOME/workspaces/bin/_trust-guard" 2>/dev/null || true
+    mkdir -p "$WBIN"
+    if cp "$WTOOLS/trust-guard.sh" "$WBIN/_trust-guard" 2>/dev/null; then
+        chmod 0755 "$WBIN/_trust-guard" 2>/dev/null || true
         log "worker trust-guard installed"
     else
         log "WARNING: could not install worker trust-guard"
     fi
+fi
+# The worker helpers themselves are MANAGER-OWNED (it edits them in-session, same
+# rule as AGENTS.md), so install only the ones that are MISSING — a fresh pod or a
+# lost PVC gets working helpers, an existing pod keeps its own. AGENTS.md carries
+# the spec they must satisfy.
+if [ -d "$WTOOLS" ]; then
+    mkdir -p "$WBIN"
+    seeded=""
+    for h in spawn-worker resume-worker tell-worker read-worker list-workers kill-worker _worker-cfg; do
+        [ -f "$WTOOLS/$h" ] || continue
+        [ -e "$WBIN/$h" ] && continue
+        cp "$WTOOLS/$h" "$WBIN/$h" && chmod 0755 "$WBIN/$h" && seeded="$seeded $h"
+    done
+    [ -n "$seeded" ] && log "worker helpers seeded (were missing):$seeded"
 fi
 
 # 9. Optional caddy web server ($CLAUDE_WEB_ENABLED). Serves ONLY
@@ -358,7 +373,7 @@ if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
         # Manager owns worker revival now → skip the step-11 background resume to
         # avoid two resume-worker runs racing on the same tmux session.
         MANAGER_RECONCILES=1
-        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per AGENTS.md: for EVERY registered worker in .workers.json check it is live (claude agents --json + tmux has-session); resume-worker any that is missing or stuck, resolve resume/onboarding/trust modals, and verify each shows /rc active. Then check appctl status and restart any stale app. Report a one-line status per worker and app. Do not start new work."
+        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per AGENTS.md: for EVERY registered worker in .workers.json check it is live (list-workers — workers run on their own CLAUDE_CONFIG_DIR, so the manager's 'claude agents --json' cannot see them); resume-worker any that is missing, stuck or showing up-DEADPANE (kill the lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, and verify each shows remote control active. Then check appctl status and restart any stale app. Report a one-line status per worker and app. Do not start new work."
         START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND '$BOOT_PROMPT'"
         log "manager boot prompt: auto-reconcile (workers=$have_workers apps=$have_apps)"
     fi

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# read-worker <name> [lines]  — print the worker's current screen (default 40 lines).
+set -euo pipefail
+NAME="${1:?usage: read-worker <name> [lines]}"
+LINES="${2:-40}"
+tmux has-session -t "$NAME" 2>/dev/null || { echo "no worker '$NAME'" >&2; exit 1; }
+tmux capture-pane -t "$NAME" -p | sed '/^[[:space:]]*$/d' | tail -n "$LINES"

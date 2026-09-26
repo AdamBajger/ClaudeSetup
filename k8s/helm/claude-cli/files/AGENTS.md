@@ -19,7 +19,7 @@ Default reply to "do X in proj Y" = "hand to Y worker?" — not silent complianc
 - `resume-worker <name>` — restart worker, same convo (id derived, see req 4), new URL.
 - `tell-worker <name> <task...>` — send prompt + submit.
 - `read-worker <name> [lines]` — print worker screen.
-- `list-workers` — live claude + tmux sessions + registry.
+- `list-workers` — per worker: tmux state (incl. `up-DEADPANE`), pid, status, session id. Authoritative liveness view.
 - `kill-worker <name>` — end tmux session, drop from registry, keep dir.
 Registry `~/workspaces/.workers.json` = **NAME SET only**: `{"<name>": {}}` — keys are
 worker names, values ignored. It answers exactly one question: which dirs get a worker
@@ -29,21 +29,20 @@ still honoured), `repo` = `git -C <dir> remote get-url origin`, `session` = see 
 URL = pane banner or the claude.ai/code session list. Never store those: a stored session
 id rotted 4 months unnoticed and a stored URL dies at every restart (issue #10). Keep the
 object shape — a bare JSON array breaks every `jq keys[]` reader.
-These helpers are NOT in the setup repo — I author/maintain them here per the spec
-below. If they predate these rules, regenerate them.
+Reference copies live in the setup repo (`worker-tools/`) and the entrypoint installs
+any that are MISSING — never overwriting, so my in-session edits stay authoritative.
+The spec below is what they must satisfy; if a helper predates these rules, regenerate it.
 
 ### Helper requirements (spawn-worker / resume-worker) — keep current
 1. **Per-worker config isolation (issue #4).** Each worker MUST run with its own
    `CLAUDE_CONFIG_DIR` on the PVC so concurrent workers don't corrupt one shared
-   `.claude.json` (torn writes → onboarding-modal hangs). Before `tmux new-session`:
-   ```sh
-   CFG="$DIR/.claudecfg"; mkdir -p "$CFG"
-   ln -sfn /home/claude/.claude/.credentials.json "$CFG/.credentials.json"   # share one OAuth token
-   ln -sfn /home/claude/.claude/skills            "$CFG/skills" 2>/dev/null || true
-   [ -f "$CFG/settings.json" ] || cp /home/claude/.claude/settings.json "$CFG/settings.json" 2>/dev/null || true
-   ```
-   and prefix the launch: `CLAUDE_CONFIG_DIR='$CFG' claude --remote-control ...`.
-   `$CFG` is stable (derived from the fixed worker name) so `-c`/`--resume` stay consistent.
+   `.claude.json` (torn writes → onboarding-modal hangs). `CFG=$(_worker-cfg "$NAME")`
+   prepares and prints it (`<dir>/.claudecfg`: creds + skills symlinked, settings
+   copied once, `.claude.json` seeded with onboarding + folder trust for that dir);
+   then prefix the launch `CLAUDE_CONFIG_DIR='$CFG' claude --remote-control …`.
+   `$CFG` is stable (derived from the fixed worker name) so `--resume` stays consistent.
+   Consequence: a worker's transcripts, session records and state all live under
+   `$CFG`, invisible to the manager's `claude agents --json` — see Coordination.
 2. **Ready poll matches new + old status (issue #2).** claude v2.1.177 prints
    `/rc active`, older prints `Remote Control active`:
    `tmux capture-pane -t "$NAME" -p | grep -Eq '/remote-control is active|/rc active|Remote Control active'`.
@@ -53,9 +52,12 @@ below. If they predate these rules, regenerate them.
    register. Source the URL later from the web UI session list when needed.
 4. **resume-worker must reuse the SAME `CLAUDE_CONFIG_DIR` and resume by a DERIVED id.**
    A worker's transcript lives under its own config dir (`$DIR/.claudecfg/projects/…`),
-   so resume MUST launch with `CLAUDE_CONFIG_DIR=$DIR/.claudecfg` (re-create the
-   creds symlink first) — otherwise claude sees an empty config, finds no session,
-   and drops to onboarding/a fresh convo. Resolve the id at resume time, in order:
+   so resume MUST launch with `CLAUDE_CONFIG_DIR=$DIR/.claudecfg` (via `_worker-cfg`)
+   — otherwise claude sees an empty config, finds no session, and drops to
+   onboarding/a fresh convo. A worker predating isolation has its transcript in the
+   SHARED config: copy `~/.claude/projects/<enc>/<id>.jsonl` into `$CFG/projects/<enc>/`
+   on first resume, else `--resume <id>` finds nothing and silently starts fresh.
+   Resolve the id at resume time, in order:
    (a) newest `sessions/*.json` record whose `.tmux` starts `"<name>:"` — PVC-backed,
    survives a bounce, and is the only signal that tells a worker apart from an IDE
    session in the same dir (`.tmux` null, `entrypoint:"claude-vscode"`);
@@ -138,7 +140,7 @@ race on the same tmux session — revival is mine to own). It also injects the
 reconcile checklist via the manager-startup SessionStart hook. So on every wake,
 run the loop below — don't wait to be asked. Per registered worker:
 ```
-claude agents --json                 # is a claude live for ~/workspaces/<name>?
+list-workers                         # per-worker tmux + pid + status + session id
 tmux has-session -t <name>           # does its pane exist?
 # missing / dead pane      -> resume-worker <name>   (recreate; wait ~10s)
 read-worker <name>                   # then clear what's on screen:
@@ -157,7 +159,7 @@ the entrypoint failed to start has no pane and is easy to miss. Then reconcile a
 - `--dangerously-skip-permissions` — autonomous, no prompts.
 - `-c` continue latest convo in cwd; `-r/--resume <id>` exact; `--resume` no-val = picker (TTY); no `--resume latest`.
 - `-p` headless (no RC URL); `-n <name>` display name.
-- `claude agents --json` — live registry, no TTY. Fields pid, cwd, kind, startedAt, sessionId, status(idle/busy). sessionId ≠ URL session_ id.
+- `claude agents --json` — live registry, no TTY. Fields pid, cwd, kind, startedAt, sessionId, status(idle/busy). sessionId ≠ URL session_ id. SCOPED TO `$CLAUDE_CONFIG_DIR`: workers run on their own (issue #4), so this does NOT list them — use `list-workers`, or `CLAUDE_CONFIG_DIR=<dir>/.claudecfg claude agents --json`.
 - `CLAUDE_CONFIG_DIR` — relocates a process's whole config (`.claude.json`+config dir). Per-worker value = isolation (issue #4).
 
 ## Spawn raw (no helper)
@@ -174,7 +176,7 @@ tmux new-session -d -s "$NAME" -x 200 -y 50 -c "$DIR" \
 - Send: text, sleep 1, Enter (two send-keys; separate Enter submits reliably).
 
 ## Coordination (no push to manager — poll)
-- `claude agents --json` status busy→idle = turn done.
+- Worker busy→idle = turn done. Read it from `list-workers` (or the worker's own `<dir>/.claudecfg/sessions/*.json`) — NOT the manager's `claude agents --json`, which cannot see other config dirs.
 - Inbox/status file per worker dir (tell worker to write it).
 - Worker commits/pushes; watch git.
 - Manager on `/loop` or RemoteTrigger to wake + check.

@@ -162,8 +162,10 @@ COPY --chown=root:root caddy/webshare-auth /usr/local/bin/webshare-auth
 # Slack channel-monitoring executables (the skill + templates live in skills/).
 COPY --chown=root:root slack-monitor/ /usr/local/lib/slack-monitor/
 
-# Worker-tending executables the entrypoint installs into ~/workspaces/bin/
-# (trust-guard answers the startup trust dialogs on an auto-resumed worker pane).
+# Worker-tending executables the entrypoint installs into ~/workspaces/bin/:
+# trust-guard (refreshed every start — answers the startup trust dialogs on an
+# auto-resumed pane) plus reference copies of the manager-owned worker helpers,
+# seeded only when missing so a fresh pod / lost PVC isn't left with none.
 COPY --chown=root:root worker-tools/ /usr/local/lib/worker-tools/
 
 # YouTrack knowledgebase (articles) REST helper — issues go through the MCP.
@@ -183,7 +185,7 @@ RUN chmod 0644 /etc/profile.d/claude.sh && \
     chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/webshare /usr/local/bin/webshare-auth /usr/local/bin/youtrack-kb /usr/local/bin/appctl \
         /usr/local/lib/caveman/caveman-activate.sh /usr/local/lib/caveman/caveman-tracker.sh \
         /usr/local/lib/slack-monitor/slack-lock /usr/local/lib/slack-monitor/slack-cron-reminder.sh \
-        /usr/local/lib/worker-tools/trust-guard.sh \
+        /usr/local/lib/worker-tools/* \
         /usr/local/lib/claude-hooks/manager-startup.sh
 
 # ---------------------------------------------------------------------------
