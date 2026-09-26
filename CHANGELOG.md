@@ -34,10 +34,50 @@ steps an existing pod needs; the code itself always describes the current layout
   ones that are **missing**, so a fresh pod or a lost PVC gets working helpers while an
   existing pod keeps its own edits.
 
+#### Deploying this change
+
+The chart pulls `adambajger/claude-cli-cloud-run:latest`, so a `helm upgrade` alone
+changes nothing here — entrypoint, Dockerfile, AGENTS.md and `worker-tools/` all ship
+inside the image. Order:
+
+1. Merge this PR.
+2. Rebuild and push the image. The cache-bust arg also bakes a current CLI, which
+   matters now that the auto-updater is disabled: the image version is the version the
+   pod keeps until the next rebuild.
+   ```sh
+   docker build -f claude.Dockerfile -t adambajger/claude-cli-cloud-run:latest \
+     --build-arg CLAUDE_CACHE_BUST=$(date +%s) .
+   docker push adambajger/claude-cli-cloud-run:latest
+   ```
+3. Run migration step 0 below on the live pod, as late as possible before the restart.
+4. `helm upgrade --install claude k8s/helm/claude-cli -n <ns> -f k8s/helm/claude-cli/values.yaml`
+
+Expected on boot: trust pre-accepted for `~/workspaces` and every registered worker dir
+(shared + private configs), missing helpers seeded, the RECONCILE prompt dispatched to
+the manager, and the entrypoint's own background resume skipped so the two don't race.
+
+Verify after boot:
+```sh
+list-workers                              # expect: up, a live pid, the prior session id
+read-worker <name>                        # if a pane sits on a modal instead
+kubectl logs <pod> | grep -E 'trust|helpers|reconcile|resuming'
+```
+With a worker registered, revival is the manager's job and the entrypoint skips its own
+resume loop, so `~/workspaces/.workers-resume.log` is NOT written on such a boot — look
+for the `worker revival delegated to the manager's boot reconcile` log line instead. The
+log only appears when nothing is registered for the manager to reconcile.
+Not yet exercised anywhere: the entrypoint-driven boot path itself (seeding, reconcile
+prompt, background resume). The helpers were tested from a shell on a live pod, spawn
+and resume both, but this redeploy is the first run of the boot sequence.
+
 #### Migration notes
 
-Performed on the live pod on 2026-09-26, before this PR was merged. Needed only for a
-pod whose PVC predates the changes above; a fresh PVC needs none of it.
+Needed only for a pod whose PVC predates the changes above; a fresh PVC needs none of
+it. **Steps 1–3 were already performed on the live pod on 2026-09-26** (registry
+reduced to `{"zennit-crp": {}}`; zennit-crp moved into `.claudecfg` and restarted
+there on session `979a7c86…` with history intact; the dead-pane `aigopath-contract-spec`
+session purged and dropped from the registry). Step 0 was performed too, but is the one
+step to repeat immediately before the restart.
 
 0. Config file into the config dir (was a one-off `cp` in `entrypoint.sh`, now removed).
    `CLAUDE_CONFIG_DIR=~/.claude` means claude reads `~/.claude/.claude.json`; a pod that
