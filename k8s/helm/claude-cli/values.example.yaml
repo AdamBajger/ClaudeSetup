@@ -1,113 +1,65 @@
-# claude-cli values
-# Required: auth.authorizedKeys (or auth.existingSecret).
-# Recommended: provide auth.credentialsJson via SOPS/sealed-secrets/external-secrets
-# rather than plaintext here, OR pre-create a Secret and set auth.existingSecret.
+# claude-cli values. Required: auth.authorizedKeys (or auth.existingSecret).
 
 image:
   repository: adambajger/claude-cli-cloud-run
   tag: "latest"
-  pullPolicy: Always    # Always — :latest tag, ensure cluster picks up new pushes
+  pullPolicy: Always    # :latest tag → always pull new pushes
 
 auth:
-  # Use a pre-existing Secret (managed by SOPS / sealed-secrets / ESO). When set,
-  # the chart will NOT create a Secret. The Secret must contain keys:
-  #   AUTHORIZED_KEYS (required), credentials.json (optional), GH_TOKEN (optional), HF_TOKEN (optional)
+  # Pre-made Secret (SOPS/sealed-secrets/ESO); set → chart creates none. Keys: AUTHORIZED_KEYS, credentials.json?, GH_TOKEN?, HF_TOKEN?, YT_TOKEN?
   existingSecret: ""
 
-  # Fallback: chart creates a Secret from these values. Plaintext in values.yaml —
-  # only use for local/testing or when the values file itself is encrypted.
-  # SSH public keys allowed to log in as `claude`. Accepts a YAML list (one key
-  # per item, recommended) OR a single multi-line block scalar (back-compat).
-  # Keys are merged + deduped into ~/.ssh/authorized_keys on pod start.
+  # Below = plaintext fallback; only for testing or encrypted values file.
+  # SSH pubkeys for user `claude`: list (one per item) or multi-line string; merged+deduped into authorized_keys on start.
   authorizedKeys:
     - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP7NHRZqsXu7qCGYj9lAPUdJnA4Ts2XjprYO/9PBtAWY adamb@xiaomi-redmi-note-11s5g
     # - ssh-ed25519 ANOTHER_KEY jane.doe@example.com
-  # Equivalent block-scalar form (either works):
-  #   authorizedKeys: |-
-  #     ssh-ed25519 YOUR_PUBLIC_KEY john.doe@proton.me
-  # Raw contents of ~/.claude/.credentials.json (single-line JSON, or YAML
-  # block scalar). Bootstrapped onto the PVC on first pod start; CLI then owns
-  # the file and refreshes tokens in place. To re-bootstrap from this value,
-  # delete the PVC's copy and restart the pod:
-  #   kubectl exec deploy/<release>-claude-cli -- rm /home/claude/.claude/.credentials.json
-  #   kubectl rollout restart deploy/<release>-claude-cli
-  # Source on host:
-  #   cat ~/.claude/.credentials.json
+  # Host ~/.claude/.credentials.json contents; seeded to PVC on first start or when this value changes, then CLI owns it.
   credentialsJson: |-
     {"copy your full":".claude/.credentials.json content here"}}
   ghToken: "gho_op..."           # optional GH_TOKEN
   hfToken: "hf_..."              # optional HF_TOKEN (HuggingFace)
-  ytToken: ""                    # optional YouTrack permanent token (perm-...); pair with youtrack.host
+  ytToken: ""                    # optional YouTrack token (perm-...); pair with youtrack.host
 
-# --- Public endpoint ----------------------------------------------------------
-# ONE LoadBalancer (IPv4 + IPv6) + ONE FQDN (public.host) serve everything:
-#   port 22  -> sshd            (public.ssh.enabled)
-#   port 80  -> caddy (HTTP, redirects to HTTPS + serves the ACME challenge)
-#   port 443 -> caddy (HTTPS, auto Let's Encrypt cert for public.host)
-# caddy terminates TLS itself — there is NO nginx Ingress / cert-manager.
-# ExternalDNS publishes A + AAAA for the LB from public.host (single source of
-# truth: DNS + TLS SAN + caddy vhost + SSH target).
-#
-# enabled=false drops the Service entirely (sshd + caddy still run in-pod; reach
-# them via `kubectl exec` / port-forward).
+# One LB + one FQDN: 22→sshd, 80/443→caddy (own auto-TLS, no Ingress/cert-manager); ExternalDNS A+AAAA from host.
 public:
-  enabled: true
-  host: claude-bajger.dyn.cloud.e-infra.cz   # SINGLE source of truth ("" = no DNS/TLS)
-  type: LoadBalancer        # LoadBalancer (public) | NodePort | ClusterIP
-  dualStack: true           # request IPv6 + IPv4 (needed for IPv6)
-  sourceRanges: []          # firewall allowlist for ALL ports; list BOTH v4 + v6 CIDRs
+  enabled: true             # false = no Service; reach pod via kubectl exec/port-forward
+  host: claude-bajger.dyn.cloud.e-infra.cz   # single source for DNS, TLS, caddy vhost, SSH ("" = none)
+  type: LoadBalancer        # LoadBalancer | NodePort | ClusterIP
+  dualStack: true           # request IPv4 + IPv6
+  sourceRanges: []          # allowlist for ALL ports; list both v4 + v6 CIDRs
   ssh:
-    enabled: true           # expose 22 -> sshd
-    port: 22                # LB listen port for SSH (targets in-pod 2222)
+    enabled: true           # expose SSH
+    port: 22                # LB port → in-pod 2222
   web:
-    enabled: true           # expose 80 + 443 -> caddy (auto-TLS)
-    email: ""               # ACME account email (recommended; "" = anonymous)
-    staging: false          # true = LE staging endpoint (untrusted certs, no rate limit)
+    enabled: true           # expose 80 + 443 → caddy
+    email: ""               # ACME email ("" = anonymous)
+    staging: false          # true = LE staging (untrusted certs, no rate limit)
 
 persistence:
   size: 20Gi
-  storageClass: ""      # "" -> cluster default
+  storageClass: ""      # "" = cluster default
 
 resources:
   requests: { cpu: 200m, memory: 512Mi }
   limits:   { cpu: "2",  memory: 8Gi }
 
-# Memory-backed /dev/shm size (default container shm is 64Mi). Counts against
-# the pod memory limit above, so keep it well under limits.memory. Empty/unset
-# = use the 64Mi default.
-shmSize: ""
+shmSize: ""             # memory-backed /dev/shm size, counts vs limits.memory ("" = 64Mi default)
 
-# Publish HTML/apps from ~/workspaces over HTTPS: see the `public` block above
-# (caddy serves ~/workspaces/.public; manage with `webshare add <name> <dir>`).
-
-# --- Plugin-like integrations -------------------------------------------------
-# YouTrack MCP — configured only if BOTH youtrack.host and auth.ytToken are set.
 youtrack:
-  host: ""                 # e.g. https://youtrack.yourco.com  ("" = disabled)
+  host: ""                 # e.g. https://youtrack.yourco.com; MCP on only if host + auth.ytToken set
 
-# Slack: MCP is an account-level claude.ai connector (enable on the account).
-# The slack-monitor tools + enable-slack-channel-monitoring skill are always
-# baked + installed (inert until you run the skill) — no toggle needed.
+# Slack: account-level claude.ai connector; slack-monitor tools + skill always baked, no toggle.
 
-# Auto-start claude in detached tmux session. Attach: `tmux attach -t <tmuxSessionName>`.
 claude:
   autoStartTmux:
-    enabled: true
-    tmuxSessionName: "claude"
-    # Name the remote-control session (recommended): without a name it auto-names
-    # by hostname and reattaches to the prior cloud session instead of starting
-    # fresh. No --continue → fresh each pod (state lives in files).
+    enabled: true           # run claude in detached tmux on start
+    tmuxSessionName: "claude"   # attach: tmux attach -t <name>
+    # Named RC session → fresh cloud session each pod (unnamed reattaches to old one).
     claudeCommand: "claude --remote-control \"My Orchestrator\" --dangerously-skip-permissions"
 
-# GPU request — mirrors resolve_gpu() from job-submitting utility.
-# Whole-GPU types ("A100" | "A40" | "H100" | "Tesla P100") add
-#   nvidia.com/gpu: <count>            into resources.limits
-#   nvidia.com/gpu.product: <product>  into nodeSelector
-# MIG types ("mig-1g.10gb" | "mig-2g.20gb") add only
-#   nvidia.com/<mig_type>: <count>     into resources.limits  (no nodeSelector)
-# All requested GPUs must reside on the same node.
-# Product names: https://grafana.rationai.cloud.trusted.e-infra.cz/d/b755d03d-d664-486a-8fda-34c59377bf2d
-# Leave commented to deploy without GPU.
+# GPU (mirrors resolve_gpu()). Whole GPU → nvidia.com/gpu limit + gpu.product nodeSelector; MIG → nvidia.com/<mig> limit only.
+# Products: https://grafana.rationai.cloud.trusted.e-infra.cz/d/b755d03d-d664-486a-8fda-34c59377bf2d
 # gpu:
 #   type: "A100"          # A100 | A40 | H100 | Tesla P100 | mig-1g.10gb | mig-2g.20gb
-#   count: 1
+#   count: 1              # all on one node

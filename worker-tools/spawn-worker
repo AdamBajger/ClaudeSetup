@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# spawn-worker <name> <repo-url> [initial-task] — clone into ~/workspaces/<name>,
+# start RC claude worker in own tmux session, register name, print steer URL.
+set -euo pipefail
+NAME="${1:?usage: spawn-worker <name> <repo-url> [initial-task]}"
+REPO="${2:?usage: spawn-worker <name> <repo-url> [initial-task]}"
+TASK="${3:-}"
+[ "$NAME" = "claude" ] && { echo "refusing: 'claude' is the manager session" >&2; exit 1; }
+
+WROOT=/home/claude/workspaces
+DIR="$WROOT/$NAME"
+REG="$WROOT/.workers.json"
+
+tmux has-session -t "$NAME" 2>/dev/null && { echo "worker '$NAME' already has a tmux session; aborting" >&2; exit 1; }
+
+if [ -d "$DIR/.git" ]; then
+  echo "repo already present at $DIR (reusing)"
+else
+  echo "cloning $REPO -> $DIR"
+  # gh handles OWNER/REPO + github auth; plain git for other hosts
+  gh repo clone "$REPO" "$DIR" || { echo "gh clone failed, trying git clone" >&2; git clone "$REPO" "$DIR"; }
+fi
+
+CFG=$("$WROOT/bin/_worker-cfg" "$NAME" "$DIR")
+
+echo "starting remote-control worker in tmux session '$NAME' (400x200, cfg $CFG)"
+tmux new-session -d -s "$NAME" -x 400 -y 200 -c "$DIR" \
+  "CLAUDE_CONFIG_DIR='$CFG' claude --remote-control \"$NAME\" --dangerously-skip-permissions"
+
+"$WROOT/bin/_trust-guard" "$NAME" 45 || echo "WARNING: trust-guard failed for '$NAME'" >&2
+
+# TUI up ~10-12s cold; poll before touching it
+ready=no
+for _ in $(seq 1 40); do
+  if tmux capture-pane -t "$NAME" -p | grep -qE '/remote-control is active|/rc active|Remote Control active'; then ready=yes; break; fi
+  sleep 1
+done
+[ "$ready" = yes ] || echo "WARNING: '$NAME' not confirmed RC-active — check: read-worker $NAME" >&2
+
+URL=$(tmux capture-pane -t "$NAME" -p | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]+' | head -1 || true)
+
+# Register NAME only (everything else derived). Never skip over failed URL scrape.
+[ -f "$REG" ] || echo '{}' > "$REG"
+tmp=$(mktemp)
+jq --arg n "$NAME" '.[$n]={}' "$REG" > "$tmp"
+mv "$tmp" "$REG"
+
+echo "worker '$NAME' registered"
+echo "  dir: $DIR"
+echo "  url: ${URL:-<not found - check: read-worker $NAME>}"
+
+if [ -n "$TASK" ]; then
+  echo "dispatching initial task..."
+  tmux send-keys -t "$NAME" "$TASK"; sleep 1; tmux send-keys -t "$NAME" Enter
+fi

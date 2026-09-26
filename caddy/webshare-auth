@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
-# webshare-auth — toggle HTTP Basic Auth in front of ALL caddy-served content
-# (webshare dirs + proxied apps). Writes a caddy.d snippet (persists on the PVC)
-# and live-reloads caddy — no pod restart. User is fixed to "admin".
+# webshare-auth — HTTP Basic Auth (user "admin") over ALL caddy content, live.
+# Snippet lives in caddy.d (PVC, never git); regenerated Caddyfile re-imports it,
+# so auth survives restarts. No matcher → basic_auth gates every route.
 #
-#   webshare-auth set <password>   enable / change password (live)
-#   webshare-auth off              disable auth (live)
-#   webshare-auth status           show current state
-#
-# The Caddyfile is regenerated on every pod start but re-imports caddy.d/*.caddy,
-# so this snippet keeps auth on across restarts. Caddy runs `basic_auth` before
-# file_server/reverse_proxy, so with no matcher it gates every route.
-#
-# NOTE: caddy terminates TLS itself (HTTPS :443) for the public host, so Basic
-# credentials are encrypted on the wire. The password + snippet live ONLY on the
-# PVC, never in git.
+#   webshare-auth set <password>   enable / change password
+#   webshare-auth off              disable
+#   webshare-auth status           show state
 set -euo pipefail
 
 CADDYFILE="/home/claude/workspaces/Caddyfile"
@@ -25,9 +17,9 @@ reload() {
     echo "NOTE: $CADDYFILE not found (web disabled?). Snippet written; it applies on next start." >&2
     return 0
   fi
-  caddy reload --config "$CADDYFILE" --adapter caddyfile 2>/dev/null \
-    && echo "caddy reloaded." \
+  caddy reload --config "$CADDYFILE" --adapter caddyfile \
     || { echo "ERROR: caddy reload failed; auth NOT live (snippet on disk though)." >&2; exit 1; }
+  echo "caddy reloaded."
 }
 
 case "${1:-status}" in

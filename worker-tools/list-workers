@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# list-workers — per worker: registry name, tmux state, live claude pid/status/session.
+# `claude agents --json` scoped to $CLAUDE_CONFIG_DIR → can't see workers (own cfg);
+# read each worker's <dir>/.claudecfg/sessions/*.json instead.
+set -euo pipefail
+shopt -s nullglob
+WROOT=/home/claude/workspaces
+REG="$WROOT/.workers.json"
+
+echo "== this config dir's claude sessions (status / cwd / pid) =="
+claude agents --json | jq -r '.[] | "\(.status)\t\(.cwd)\tpid=\(.pid)"'
+echo
+echo "== tmux sessions (excluding manager) =="
+tmux list-sessions -F '#{session_name}' | grep -v '^claude$' || echo "(none)"
+echo
+
+[ -f "$REG" ] || { echo "(no worker registry)"; exit 0; }
+echo "== workers (name / tmux / pid / status / session id) =="
+jq -r 'keys[]' "$REG" | while read -r n; do
+  d="$WROOT/$n"
+  tmux has-session -t "$n" 2>/dev/null && t=up || t=MISSING
+  # Lingering session w/ dead pane: resume-worker refuses ("already running") → surface it.
+  [ "$t" = up ] && [ "$(tmux list-panes -t "$n" -F '#{pane_dead}' | head -1)" = 1 ] && t=up-DEADPANE
+  rec=$'-\t-\t-'
+  files=("$d/.claudecfg/sessions"/*.json)
+  if [ ${#files[@]} -gt 0 ]; then
+    rec=$(jq -rs --arg n "$n" '[.[] | select((.tmux // "") | startswith($n + ":"))]
+                               | sort_by(.startedAt) | last
+                               | if . then "\(.pid)\t\(.status)\t\(.sessionId)" else "-\t-\t-" end' \
+          "${files[@]}") || { echo "WARNING: $n: unreadable session record" >&2; rec=$'-\t-\t-'; }
+  fi
+  # Record outlives its process → confirm pid alive.
+  pid=${rec%%$'\t'*}
+  [ "$pid" = "-" ] || kill -0 "$pid" 2>/dev/null || rec="${pid}(STALE)"$'\t'"-"$'\t'"${rec##*$'\t'}"
+  printf '%s\t%s\t%s\n' "$n" "$t" "$rec"
+done

@@ -1,48 +1,74 @@
 #!/bin/sh
-# Container entrypoint. Unprivileged `claude` user. Idempotent. Shared by docker
-# compose and k8s. Steps:
-#  0. Data bootstrap (compose parity w/ k8s init): dirs, .claude.json onboarding,
-#     .bash_history, credentials from $CLAUDE_CREDENTIALS_JSON. Idempotent, only
-#     re-seeds creds when $CLAUDE_CREDENTIALS_JSON changes (k8s leaves it unset,
-#     seeds from Secret file).
-#  1. ed25519 SSH host key (ephemeral).        7. Wire node-free caveman hooks.
-#  2. authorized_keys from $AUTHORIZED_KEYS.   8. YouTrack MCP + Slack tooling.
-#  3. Export GH/HF tokens for SSH shells.      9. caddy web server ($CLAUDE_WEB_ENABLED).
-#  4. gh auth login.                          10. Autostart detached tmux claude.
-#  5. Pre-accept workspace trust dialog.      11. Auto-resume registered workers.
-#  6. Seed skills + orchestrator AGENTS.md.   12. exec CMD (sshd -D -e default).
+# Container entrypoint (compose + k8s). Runs as `claude`. Idempotent.
+#  0. data bootstrap             6. seed skills, wire hooks
+#  1. SSH host key               8. YouTrack MCP, Slack tools, trust-guard
+#  2. authorized_keys            9. caddy ($CLAUDE_WEB_ENABLED)
+#  3. export tokens to SSH      10. autostart manager in tmux
+#  4. gh auth                   11. start apps, resume workers
+#  5. pre-accept trust dialog   12. exec CMD (sshd -D -e)
 set -eu
 
+# Self-update swaps ~/.local/bin/claude symlink → kills running manager+worker
+# sessions. Pin binary for pod lifetime; update = rebuild w/ CLAUDE_CACHE_BUST.
+DISABLE_AUTOUPDATER=1
+export DISABLE_AUTOUPDATER
+
 CLAUDE_HOME=/home/claude
+WORKDIR="$CLAUDE_HOME/workspaces"
+BIN="$WORKDIR/bin"
 SSH_KEYDIR="$CLAUDE_HOME/.ssh/host-keys"
 AUTH_KEYS_FILE="$CLAUDE_HOME/.ssh/authorized_keys"
+SETTINGS="$CLAUDE_HOME/.claude/settings.json"
+ONBOARDED='{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}'
 
 log() { printf '[entrypoint] %s\n' "$*" >&2; }
 
+# reg_count <registry.json> → entry count; 0 if absent/empty/unparseable
+reg_count() {
+    [ -s "$1" ] || { echo 0; return 0; }
+    jq -r 'keys|length' "$1" || { log "WARNING: $1 unparseable, treated as empty"; echo 0; }
+}
+
+# settings_merge <label> <jq-filter> [jq args...] — merge into settings.json
+# jq def addhook($ev; $cmd): append command hook to event unless present.
+ADDHOOK='def addhook($ev; $cmd):
+    .hooks[$ev] = (.hooks[$ev] // [])
+    | if any(.hooks[$ev][].hooks[]?; .command == $cmd) then .
+      else .hooks[$ev] += [{hooks:[{type:"command",command:$cmd,timeout:5}]}] end;'
+settings_merge() {
+    label="$1"; filter="$2"; shift 2
+    tmp=$(mktemp)
+    if jq "$@" "$ADDHOOK $filter" "$SETTINGS" > "$tmp"; then
+        cat "$tmp" > "$SETTINGS"
+        log "$label"
+    else
+        log "WARNING: settings.json merge failed: $label"
+    fi
+    rm -f "$tmp"
+}
+
 # 0. Data bootstrap
-mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$CLAUDE_HOME/workspaces" \
-         "$CLAUDE_HOME/workspaces/.uv" "$CLAUDE_HOME/workspaces/.apps"
-# .claude.json lives inside CLAUDE_CONFIG_DIR (default ~/.claude) so atomic saves
-# work on the PVC dir mount (issue #4). Migrate the legacy ~/.claude.json once.
+mkdir -p "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config/gh" "$WORKDIR" \
+         "$WORKDIR/.uv" "$WORKDIR/.apps" "$BIN"
+# .claude.json inside CLAUDE_CONFIG_DIR dir mount → atomic saves work.
 CFGDIR="${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME/.claude}"
 mkdir -p "$CFGDIR"
 CJSON="$CFGDIR/.claude.json"
-if [ -f "$CLAUDE_HOME/.claude.json" ] && [ ! -L "$CLAUDE_HOME/.claude.json" ] && [ ! -e "$CJSON" ]; then
-    cp "$CLAUDE_HOME/.claude.json" "$CJSON" 2>/dev/null || true
-    log "migrated legacy ~/.claude.json -> $CJSON"
-fi
-if [ ! -s "$CJSON" ] || [ "$(cat "$CJSON" 2>/dev/null)" = '{}' ]; then
-    printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJSON"
+if [ ! -s "$CJSON" ] || [ "$(cat "$CJSON")" = '{}' ]; then
+    printf '%s\n' "$ONBOARDED" > "$CJSON"
 fi
 [ -e "$CLAUDE_HOME/.bash_history" ] || touch "$CLAUDE_HOME/.bash_history"
+# Re-seed creds only when $CLAUDE_CREDENTIALS_JSON changes; CLI rotates them after.
 if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
     CREDS="$CLAUDE_HOME/.claude/.credentials.json"
+    HASHF="$CLAUDE_HOME/.claude/.cred-bootstrap-hash"
     newhash=$(printf '%s' "$CLAUDE_CREDENTIALS_JSON" | md5sum | cut -d' ' -f1)
-    oldhash=$(cat "$CLAUDE_HOME/.claude/.cred-bootstrap-hash" 2>/dev/null || true)
+    oldhash=""
+    [ -f "$HASHF" ] && oldhash=$(cat "$HASHF")
     if [ ! -e "$CREDS" ] || [ "$newhash" != "$oldhash" ]; then
         printf '%s' "$CLAUDE_CREDENTIALS_JSON" > "$CREDS"
         chmod 600 "$CREDS"
-        printf '%s\n' "$newhash" > "$CLAUDE_HOME/.claude/.cred-bootstrap-hash"
+        printf '%s\n' "$newhash" > "$HASHF"
         log "credentials bootstrapped from \$CLAUDE_CREDENTIALS_JSON"
     fi
 fi
@@ -58,25 +84,19 @@ fi
 chmod 600 "$HOST_KEY"
 [ -f "$HOST_KEY.pub" ] && chmod 644 "$HOST_KEY.pub"
 
-# 2. authorized_keys
-mkdir -p "$CLAUDE_HOME/.ssh"
+# 2. authorized_keys (merge + dedupe)
 chmod 700 "$CLAUDE_HOME/.ssh"
 touch "$AUTH_KEYS_FILE"
-
 if [ -n "${AUTHORIZED_KEYS:-}" ]; then
     log "merging \$AUTHORIZED_KEYS into authorized_keys"
     printf '%s\n' "$AUTHORIZED_KEYS" >> "$AUTH_KEYS_FILE"
     awk 'NF && !seen[$0]++' "$AUTH_KEYS_FILE" > "$AUTH_KEYS_FILE.tmp"
     mv "$AUTH_KEYS_FILE.tmp" "$AUTH_KEYS_FILE"
 fi
-
 chmod 600 "$AUTH_KEYS_FILE"
+[ -s "$AUTH_KEYS_FILE" ] || log "WARNING: authorized_keys is empty. Set AUTHORIZED_KEYS in .env."
 
-if [ ! -s "$AUTH_KEYS_FILE" ]; then
-    log "WARNING: authorized_keys is empty. Set AUTHORIZED_KEYS in .env."
-fi
-
-# 3. Export tokens to SSH login shells
+# 3. Export env to SSH login shells (sshd drops container env; bashrc sources this)
 ENV_FILE="$CLAUDE_HOME/.claude-env"
 : > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -89,6 +109,7 @@ write_export() {
 }
 write_export GH_TOKEN
 write_export HF_TOKEN
+write_export DISABLE_AUTOUPDATER
 
 # 4. GitHub CLI auth
 if [ -n "${GH_TOKEN:-}" ]; then
@@ -99,158 +120,132 @@ if [ -n "${GH_TOKEN:-}" ]; then
         printf '%s\n' "$GH_TOKEN" | gh auth login --with-token || \
             log "WARNING: gh auth login --with-token failed (bad token? offline?)"
     fi
-    gh auth setup-git >/dev/null 2>&1 || true
+    gh auth setup-git || log "WARNING: gh auth setup-git failed"
 fi
 
-# 5. Pre-accept the workspace trust dialog. Trust is separate from
-#    --dangerously-skip-permissions with no env bypass; only route is the
-#    per-project flag in .claude.json. jq merge, runs before claude launches.
-CLAUDE_JSON="$CJSON"
-WORKDIR="$CLAUDE_HOME/workspaces"
-[ -s "$CLAUDE_JSON" ] || printf '{}\n' > "$CLAUDE_JSON"
-tmp=$(mktemp)
-if jq --arg d "$WORKDIR" \
-      '.projects[$d].hasTrustDialogAccepted = true' "$CLAUDE_JSON" > "$tmp"; then
-    # .claude.json now sits in a directory mount (CLAUDE_CONFIG_DIR) → atomic
-    # rename works (issue #4); no more truncate-in-place.
-    mv "$tmp" "$CLAUDE_JSON"
-    log "trust dialog pre-accepted for $WORKDIR"
-else
-    log "WARNING: could not pre-accept trust dialog (jq failed?)"
-    rm -f "$tmp"
-fi
-
-# 6. Seed skills + orchestrator AGENTS.md from the image (one source for compose
-#    and k8s; add a skill = drop a dir under skills/). Skills overwrite every
-#    start (image is source of truth); user-authored skills under other names are
-#    left untouched. AGENTS.md seeded only if absent (manager edits it in-session).
-SKILLSRC=/usr/local/share/claude-skills
-if [ -d "$SKILLSRC" ]; then
-    mkdir -p "$CLAUDE_HOME/.claude/skills"
-    for d in "$SKILLSRC"/*/; do
+# 5. Pre-accept folder-trust dialog. No env bypass (independent of
+#    --dangerously-skip-permissions); only per-project flag in .claude.json.
+#    Each worker dir = own project → own flag, else pane stuck on dialog, no /rc.
+#    Workers use CLAUDE_CONFIG_DIR=<dir>/.claudecfg → seed there; manager copy
+#    too, for claude on shared config in worker dir (IDE session, human shell).
+#    Dangerous-settings disclosure ("pre-approves N tool permissions") not
+#    persisted anywhere → can't pre-seed; _trust-guard answers it per pane.
+#    Avoid dangerous allow-patterns (e.g. Bash(rm -rf ...)) in project settings.
+# trust_dir <claude.json> <project-dir>
+trust_dir() {
+    f="$1"; d="$2"
+    [ -s "$f" ] || printf '%s\n' "$ONBOARDED" > "$f"
+    tmp=$(mktemp)
+    if jq --arg d "$d" '.projects[$d].hasTrustDialogAccepted = true' "$f" > "$tmp"; then
+        mv "$tmp" "$f"   # atomic rename: .claude.json in dir mount
+        log "trust dialog pre-accepted for $d ($f)"
+    else
+        log "WARNING: could not pre-accept trust dialog for $d in $f"
+        rm -f "$tmp"
+    fi
+}
+trust_dir "$CJSON" "$WORKDIR"
+WREG="$WORKDIR/.workers.json"
+if [ -s "$WREG" ]; then
+    # registry = name set; worker dir = ~/workspaces/<name>, no spaces → word-split safe
+    wdirs=$(jq -r --arg w "$WORKDIR" 'keys[] | $w + "/" + .' "$WREG") \
+        || { log "WARNING: $WREG unparseable, worker dirs not trusted"; wdirs=""; }
+    for d in $wdirs; do
         [ -d "$d" ] || continue
-        name=$(basename "$d")
-        rm -rf "$CLAUDE_HOME/.claude/skills/$name"
-        cp -r "$d" "$CLAUDE_HOME/.claude/skills/$name"
+        trust_dir "$CJSON" "$d"
+        mkdir -p "$d/.claudecfg"
+        trust_dir "$d/.claudecfg/.claude.json" "$d"
     done
-    log "seeded skills: $(ls "$SKILLSRC" 2>/dev/null | tr '\n' ' ')"
-fi
-if [ -f /usr/local/share/claude/AGENTS.md ]; then
-    mkdir -p "$CLAUDE_HOME/workspaces"
-    [ -e "$CLAUDE_HOME/workspaces/AGENTS.md" ] || cp /usr/local/share/claude/AGENTS.md "$CLAUDE_HOME/workspaces/AGENTS.md"
-    # AGENTS.md goes into the MANAGER session only (manager-startup hook, cwd-guarded).
-    # NO ~/workspaces/CLAUDE.md: claude loads it from every ANCESTOR dir → would leak
-    # the orchestrator role into workers. Migrate away the stale managed @AGENTS.md.
-    [ "$(cat "$CLAUDE_HOME/workspaces/CLAUDE.md" 2>/dev/null)" = "@AGENTS.md" ] && rm -f "$CLAUDE_HOME/workspaces/CLAUDE.md"
 fi
 
-# 6b. Wire the manager-startup SessionStart hook (cwd-guarded → inert in workers,
-#     always safe to wire). For the manager: injects AGENTS.md + tend-workers prompt.
-TEND=/usr/local/lib/claude-hooks/manager-startup.sh
-SETTINGS="$CLAUDE_HOME/.claude/settings.json"
-if [ -x "$TEND" ]; then
-    mkdir -p "$CLAUDE_HOME/.claude"
-    [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
-    tmp=$(mktemp)
-    if jq --arg cmd "$TEND" '
-        .hooks.SessionStart = (.hooks.SessionStart // [])
-        | (if any(.hooks.SessionStart[].hooks[]?; .command == $cmd) then .
-           else .hooks.SessionStart += [{hooks:[{type:"command",command:$cmd,timeout:5}]}] end)
-        ' "$SETTINGS" > "$tmp"; then
-        cat "$tmp" > "$SETTINGS"
-        log "manager-startup hook wired"
-    else
-        log "WARNING: manager-startup hook merge failed (jq?)"
-    fi
-    rm -f "$tmp"
-fi
+# 6. Seed skills (overwrite each start; image = source of truth; other-named
+#    user skills untouched).
+SKILLSRC=/usr/local/share/claude-skills
+mkdir -p "$CLAUDE_HOME/.claude/skills"
+for d in "$SKILLSRC"/*/; do
+    name=$(basename "$d")
+    rm -rf "$CLAUDE_HOME/.claude/skills/$name"
+    cp -r "$d" "$CLAUDE_HOME/.claude/skills/$name"
+done
+log "seeded skills: $(ls "$SKILLSRC" | tr '\n' ' ')"
 
-# 7. Node-free caveman. Upstream plugin hooks shell out to `node` (not installed,
-#    native claude needs none) → error every session. Disable the plugin, wire our
-#    POSIX-sh hooks instead. The /caveman skill is seeded by the step 6 loop.
+[ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
+
+# 6b. manager-startup SessionStart hook: injects image's MANAGER.md (cwd-guarded
+#     → inert in workers). No instructions file under ~/workspaces: claude
+#     auto-loads CLAUDE.md/AGENTS.md from every ancestor dir → would leak into workers.
+settings_merge "manager-startup hook wired" \
+    'addhook("SessionStart"; $cmd)' \
+    --arg cmd /usr/local/lib/claude-hooks/manager-startup.sh
+
+# 7. Node-free caveman: upstream plugin hooks need `node` (not installed) →
+#    disable plugin, wire POSIX-sh hooks. /caveman skill seeded in step 6.
 CAVE=/usr/local/lib/caveman
-SETTINGS="$CLAUDE_HOME/.claude/settings.json"
-if [ -x "$CAVE/caveman-activate.sh" ]; then
-    mkdir -p "$CLAUDE_HOME/.claude"
-    [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
-    tmp=$(mktemp)
-    if jq --arg act "$CAVE/caveman-activate.sh" --arg trk "$CAVE/caveman-tracker.sh" '
-        .enabledPlugins["caveman@caveman"] = false
-        | .hooks.SessionStart = (.hooks.SessionStart // [])
-        | .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit // [])
-        | (if any(.hooks.SessionStart[].hooks[]?; .command == $act) then .
-           else .hooks.SessionStart += [{hooks:[{type:"command",command:$act,timeout:5}]}] end)
-        | (if any(.hooks.UserPromptSubmit[].hooks[]?; .command == $trk) then .
-           else .hooks.UserPromptSubmit += [{hooks:[{type:"command",command:$trk,timeout:5}]}] end)
-        ' "$SETTINGS" > "$tmp"; then
-        cat "$tmp" > "$SETTINGS"
-        log "caveman: node-free hooks wired, node plugin disabled"
-    else
-        log "WARNING: caveman settings merge failed (jq?)"
-    fi
-    rm -f "$tmp"
-fi
+settings_merge "caveman: node-free hooks wired, node plugin disabled" \
+    '.enabledPlugins["caveman@caveman"] = false
+     | addhook("SessionStart"; $act) | addhook("UserPromptSubmit"; $trk)' \
+    --arg act "$CAVE/caveman-activate.sh" --arg trk "$CAVE/caveman-tracker.sh"
 
-# 8. Optional MCP + integrations. Sessions load MCP tools on start, so configuring
-#    here (before the autostart claude) needs no restart.
+# 8. Integrations. Before autostart claude → MCP tools load without restart.
 
-# 8a. YouTrack MCP — only if both host and token set. Re-add idempotently.
+# 8a. YouTrack MCP (needs host + token). Re-add idempotently.
 if [ -n "${YT_HOST:-}" ] && [ -n "${YT_TOKEN:-}" ]; then
+    # remove fails when not yet configured → expected
     claude mcp remove -s user youtrack >/dev/null 2>&1 || true
     if claude mcp add -s user -t http youtrack "${YT_HOST%/}/mcp" \
-            -H "Authorization: Bearer $YT_TOKEN" >/dev/null 2>&1; then
+            -H "Authorization: Bearer $YT_TOKEN" >/dev/null; then
         log "youtrack MCP configured (${YT_HOST%/})"
     else
         log "WARNING: youtrack mcp add failed"
     fi
 fi
 
-# 8b. Slack channel-monitoring tooling (always installed — harmless when unused).
-#     Slack MCP itself is an account-level claude.ai connector (can't be baked).
-#     The enable-slack-channel-monitoring skill is the toggle; this installs the
-#     tools + a registry-driven cron-reminder hook that's silent until a monitor
-#     is registered.
+# 8b. Slack monitor tools + cron-reminder hook (silent until monitor registered).
+#     Slack MCP = account-level claude.ai connector, can't be baked.
 SLACKLIB=/usr/local/lib/slack-monitor
-if [ -d "$SLACKLIB" ]; then
-    mkdir -p "$CLAUDE_HOME/workspaces/bin"
-    cp "$SLACKLIB/slack-lock" "$CLAUDE_HOME/workspaces/bin/slack-lock" 2>/dev/null || true
-    cp "$SLACKLIB/slack-cron-reminder.sh" "$CLAUDE_HOME/workspaces/bin/_slack-cron-reminder.sh" 2>/dev/null || true
-    chmod 0755 "$CLAUDE_HOME/workspaces/bin/slack-lock" "$CLAUDE_HOME/workspaces/bin/_slack-cron-reminder.sh" 2>/dev/null || true
-    # Install the manager-only cron-reminder as a SessionStart hook (idempotent).
-    REMINDER="$CLAUDE_HOME/workspaces/bin/_slack-cron-reminder.sh"
-    [ -s "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
-    tmp=$(mktemp)
-    if jq --arg cmd "$REMINDER" '
-        .hooks.SessionStart = (.hooks.SessionStart // [])
-        | (if any(.hooks.SessionStart[].hooks[]?; .command == $cmd) then .
-           else .hooks.SessionStart += [{hooks:[{type:"command",command:$cmd,timeout:5}]}] end)
-        ' "$SETTINGS" > "$tmp"; then
-        cat "$tmp" > "$SETTINGS"
-        log "slack monitor: tools + cron-reminder hook installed"
-    else
-        log "WARNING: slack cron-reminder hook merge failed (jq?)"
-    fi
-    rm -f "$tmp"
+REMINDER="$BIN/_slack-cron-reminder.sh"
+if cp "$SLACKLIB/slack-lock" "$BIN/slack-lock" \
+   && cp "$SLACKLIB/slack-cron-reminder.sh" "$REMINDER" \
+   && chmod 0755 "$BIN/slack-lock" "$REMINDER"; then
+    settings_merge "slack monitor: tools + cron-reminder hook installed" \
+        'addhook("SessionStart"; $cmd)' --arg cmd "$REMINDER"
+else
+    log "WARNING: could not install slack monitor tools"
 fi
 
-# 9. Optional caddy web server ($CLAUDE_WEB_ENABLED). Serves ONLY
-#    ~/workspaces/.public (symlinks via `webshare`) + ~/workspaces/caddy.d/*.caddy
-#    snippets — never the whole tree. The Caddyfile is GENERATED here each start
-#    (publish via `webshare add <name> <dir>`); edit routing via caddy.d snippets,
-#    not the Caddyfile.
-#    Two modes, chosen by $CLAUDE_WEB_HOST:
-#      - set   (k8s): public vhost, caddy auto-obtains a Let's Encrypt cert and
-#                     terminates HTTPS on :443 (+ :80 redirect). Needs the
-#                     NET_BIND_SERVICE cap + the file-cap baked on the binary.
-#      - unset (compose/local): plain HTTP on :8080 (no public host to certify).
-#    Cert + ACME-account storage lives on the PVC ($CADDYDATA) so renewals
-#    survive restarts and we don't re-hit Let's Encrypt rate limits.
-if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>&1; then
-    CADDYFILE="$CLAUDE_HOME/workspaces/Caddyfile"
-    CADDYLOG="$CLAUDE_HOME/workspaces/.caddy.log"
-    CADDYDATA="$CLAUDE_HOME/workspaces/.caddy"
-    PUBROOT="$CLAUDE_HOME/workspaces/.public"
-    mkdir -p "$PUBROOT" "$CLAUDE_HOME/workspaces/caddy.d" "$CADDYDATA"
+# 8c. _trust-guard (image-owned, refreshed each start): answers folder-trust +
+#     dangerous-settings dialogs on worker pane. Used by step 11 + helpers.
+WTOOLS=/usr/local/lib/worker-tools
+if cp "$WTOOLS/trust-guard.sh" "$BIN/_trust-guard" \
+   && chmod 0755 "$BIN/_trust-guard"; then
+    log "worker trust-guard installed"
+else
+    log "WARNING: could not install worker trust-guard"
+fi
+# 8d. Worker helpers = manager-owned (edits in-session) → seed only missing
+#     ones. Fresh pod / lost PVC gets working set; spec in MANAGER.md.
+seeded=""
+for h in spawn-worker resume-worker tell-worker read-worker list-workers kill-worker _worker-cfg; do
+    [ -e "$BIN/$h" ] && continue
+    if cp "$WTOOLS/$h" "$BIN/$h" && chmod 0755 "$BIN/$h"; then
+        seeded="$seeded $h"
+    else
+        log "WARNING: could not seed worker helper $h"
+    fi
+done
+[ -z "$seeded" ] || log "worker helpers seeded (were missing):$seeded"
+
+# 9. caddy. Serves ONLY ~/workspaces/.public (`webshare` symlinks) + caddy.d/*.caddy.
+#    Caddyfile regenerated each start → route via caddy.d snippets.
+#    $CLAUDE_WEB_HOST set (k8s): public vhost, auto Let's Encrypt, :443 + :80
+#    redirect (needs NET_BIND_SERVICE + file-cap on binary). Unset: plain :8080.
+#    Cert/ACME storage on PVC → renewals survive restarts, no LE rate-limit hits.
+if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ]; then
+    CADDYFILE="$WORKDIR/Caddyfile"
+    CADDYLOG="$WORKDIR/.caddy.log"
+    CADDYDATA="$WORKDIR/.caddy"
+    PUBROOT="$WORKDIR/.public"
+    mkdir -p "$PUBROOT" "$WORKDIR/caddy.d" "$CADDYDATA"
     {
         printf '{\n'
         printf '\tstorage file_system %s\n' "$CADDYDATA"
@@ -264,88 +259,73 @@ if [ "${CLAUDE_WEB_ENABLED:-false}" = "true" ] && command -v caddy >/dev/null 2>
         fi
         printf '\troot * %s\n' "$PUBROOT"
         printf '\tfile_server browse\n'
-        printf '\timport %s/workspaces/caddy.d/*.caddy\n' "$CLAUDE_HOME"
+        printf '\timport %s/caddy.d/*.caddy\n' "$WORKDIR"
         printf '}\n'
     } > "$CADDYFILE"
-    # Background daemon (not tmux — caddy is a server). setsid detaches it so it
-    # survives `exec "$@"`. Reload caddy.d: `caddy reload --config ~/workspaces/Caddyfile`.
+    # setsid → survives `exec "$@"`. Reload: caddy reload --config ~/workspaces/Caddyfile
     log "starting caddy (${CLAUDE_WEB_HOST:-:8080}; storage $CADDYDATA; logs $CADDYLOG)"
     setsid sh -c "exec caddy run --config '$CADDYFILE' --adapter caddyfile >'$CADDYLOG' 2>&1" </dev/null >/dev/null 2>&1 &
 fi
 
-# 10. Optional detached tmux session running claude. Attach: tmux attach -t <name>.
+# 10. Autostart manager claude in detached tmux.
+N_WORKERS=$(reg_count "$WREG")
+APPS_REG="$WORKDIR/.apps.json"
+N_APPS=$(reg_count "$APPS_REG")
 if [ -n "${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-}" ]; then
     TMUX_SESSION_NAME="${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
-    # Wait for outbound connectivity first: claude's remote-control connect does NOT
-    # retry, so launching before CNI/DNS/egress is up leaves a live-but-disconnected
-    # session. Poll claude.ai for any HTTP response (DNS+TCP+TLS ok), up to ~30s.
+    # remote-control connect never retries → wait for egress (any HTTP reply
+    # from claude.ai), max ~30s. curl fails while net down → expected.
     n=0
     while [ "$n" -lt 30 ]; do
-        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 https://claude.ai 2>/dev/null || true)
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 https://claude.ai || true)
         [ "$code" != "000" ] && [ -n "$code" ] && break
         n=$((n + 1))
         sleep 1
     done
     log "network ready after ${n}s (claude.ai HTTP ${code:-none}); starting tmux '$TMUX_SESSION_NAME'"
-    # Orchestrator starts FRESH each pod (no --continue): holds no chat state, rebuilds
-    # from files (AGENTS.md hook, worker registry). No resume picker for the manager.
-    #
-    # If workers/apps are registered, HAND THE MANAGER A BOOT PROMPT so it actually
-    # runs the reconcile at startup instead of idling at ❯ until a human pokes it —
-    # this is what makes stalled workers get revived automatically. The manager
-    # remains remote-controllable afterwards (the prompt is dispatched, then idle).
-    # Prompt text uses NO single quotes (it's wrapped in single quotes below).
+    # Manager starts fresh (no --continue); state rebuilt from files. With
+    # workers/apps registered, boot prompt makes it reconcile now instead of
+    # idling at ❯. Prompt must contain NO single quotes (wrapped below).
     START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND"
-    have_workers=0; have_apps=0
-    [ -s "$CLAUDE_HOME/workspaces/.workers.json" ] && [ "$(jq -r 'keys|length' "$CLAUDE_HOME/workspaces/.workers.json" 2>/dev/null || echo 0)" != "0" ] && have_workers=1
-    [ -s "$CLAUDE_HOME/workspaces/.apps.json" ]    && [ "$(jq -r 'keys|length' "$CLAUDE_HOME/workspaces/.apps.json" 2>/dev/null || echo 0)" != "0" ] && have_apps=1
-    if [ "$have_workers" = 1 ] || [ "$have_apps" = 1 ]; then
-        # Manager owns worker revival now → skip the step-11 background resume to
-        # avoid two resume-worker runs racing on the same tmux session.
+    if [ "$N_WORKERS" != 0 ] || [ "$N_APPS" != 0 ]; then
+        # manager owns revival → step 11 skips resume (no racing resume-worker)
         MANAGER_RECONCILES=1
-        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per AGENTS.md: for EVERY registered worker in .workers.json check it is live (claude agents --json + tmux has-session); resume-worker any that is missing or stuck, resolve resume/onboarding/trust modals, and verify each shows /rc active. Then check appctl status and restart any stale app. Report a one-line status per worker and app. Do not start new work."
+        BOOT_PROMPT="Pod just (re)started. Before anything else, RECONCILE per MANAGER.md: for EVERY registered worker in .workers.json check live via list-workers (NOT claude agents --json: workers on own CLAUDE_CONFIG_DIR, invisible to manager); resume-worker any missing, stuck or up-DEADPANE (kill lingering tmux session first, else resume refuses); resolve resume/onboarding/trust modals, verify each shows remote control active. Then appctl status, restart any stale app. Report one-line status per worker and app. Do not start new work."
         START_CMD="$CLAUDE_AUTOSTART_CLAUDE_COMMAND '$BOOT_PROMPT'"
-        log "manager boot prompt: auto-reconcile (workers=$have_workers apps=$have_apps)"
+        log "manager boot prompt: auto-reconcile (workers=$N_WORKERS apps=$N_APPS)"
     fi
-    tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$CLAUDE_HOME/workspaces" "$START_CMD" \
+    tmux new-session -d -s "$TMUX_SESSION_NAME" -c "$WORKDIR" "$START_CMD" \
         || log "WARNING: tmux session start failed"
 fi
 
-# 11b. Start supervised apps (issue #6): boot-start registered long-lived apps
-#      (FastAPI/uvicorn etc, fronted by caddy). Background — uv sync can be slow
-#      on a cold PVC. appctl rebuilds each .venv first and waits for the port.
-APPS_REG="$CLAUDE_HOME/workspaces/.apps.json"
-if [ -s "$APPS_REG" ] && command -v appctl >/dev/null 2>&1 \
-   && [ "$(jq -r 'keys|length' "$APPS_REG" 2>/dev/null || echo 0)" != "0" ]; then
+# 11a. Boot-start supervised apps. Background: uv sync slow on cold PVC.
+if [ "$N_APPS" != 0 ]; then
     log "starting supervised apps from registry (background; see ~/workspaces/.apps/boot.log)"
     setsid sh -c 'appctl start-all >>"$HOME/workspaces/.apps/boot.log" 2>&1' </dev/null >/dev/null 2>&1 &
 fi
 
-# 11. Resume registered worker sessions (token-free, via resume-worker). We do NOT
-#     answer their pickers here — the orchestrator reconciles each pane and decides.
-#     This is best-effort: resumes can stall (picker/modal) or the helper can be
-#     missing/stale. We log per-worker outcome to a resume log the manager reads,
-#     and the manager-startup hook makes the manager RECONCILE (re-resume anything
-#     that didn't come up) — never rely on this loop alone.
-REG="$CLAUDE_HOME/workspaces/.workers.json"
-RESUME_HELPER="$CLAUDE_HOME/workspaces/bin/resume-worker"
-RESUME_LOG="$CLAUDE_HOME/workspaces/.workers-resume.log"
+# 11b. Resume workers (token-free, via resume-worker). Pickers left for manager;
+#      trust dialogs answered here (they block /rc → worker looks dead).
+#      Best-effort: per-worker outcome → resume log; manager reconciles rest.
+RESUME_HELPER="$BIN/resume-worker"
+RESUME_LOG="$WORKDIR/.workers-resume.log"
 if [ "${MANAGER_RECONCILES:-0}" = 1 ]; then
     log "worker revival delegated to the manager's boot reconcile (skipping entrypoint auto-resume to avoid races)"
-elif [ -s "$REG" ] && command -v jq >/dev/null 2>&1 \
-   && [ "$(jq -r 'keys|length' "$REG" 2>/dev/null || echo 0)" != "0" ]; then
+elif [ "$N_WORKERS" != 0 ]; then
     if [ -x "$RESUME_HELPER" ]; then
-        log "resuming workers from registry (background; log ~/workspaces/.workers-resume.log): $(jq -r 'keys|join(" ")' "$REG" 2>/dev/null)"
+        log "resuming workers from registry (background; log ~/workspaces/.workers-resume.log): $(jq -r 'keys|join(" ")' "$WREG")"
         setsid sh -c '
-        reg="$1"; rh="$2"; rl="$3"
-        printf "==== resume run %s ====\n" "$(date -u 2>/dev/null || echo now)" >> "$rl"
-        for w in $(jq -r "keys[]" "$reg" 2>/dev/null); do
-            if "$rh" "$w" >>"$rl" 2>&1; then echo "[resume] $w: ok" >> "$rl"
-            else echo "[resume] $w: FAILED (manager must reconcile)" >> "$rl"; fi
+        reg="$1"; rh="$2"; tg="$3"
+        printf "==== resume run %s ====\n" "$(date -u)"
+        for w in $(jq -r "keys[]" "$reg"); do
+            if "$rh" "$w"; then echo "[resume] $w: ok"
+            else echo "[resume] $w: FAILED (manager must reconcile)"; fi
+            # no-op in ~0s when no dialog on screen
+            [ -x "$tg" ] && "$tg" "$w" 45
         done
-        ' _ "$REG" "$RESUME_HELPER" "$RESUME_LOG" </dev/null >/dev/null 2>&1 &
+        ' _ "$WREG" "$RESUME_HELPER" "$BIN/_trust-guard" </dev/null >>"$RESUME_LOG" 2>&1 &
     else
-        log "WARNING: $RESUME_HELPER missing/not executable — workers NOT auto-resumed. Manager must recreate the helper (per AGENTS.md) and reconcile: $(jq -r 'keys|join(" ")' "$REG" 2>/dev/null)"
+        log "WARNING: $RESUME_HELPER missing/not executable — workers NOT auto-resumed. Manager must recreate the helper (per MANAGER.md) and reconcile: $(jq -r 'keys|join(" ")' "$WREG")"
         printf '%s missing — no auto-resume; manager reconcile required\n' "$RESUME_HELPER" >> "$RESUME_LOG"
     fi
 fi

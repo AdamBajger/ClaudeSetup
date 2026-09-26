@@ -7,7 +7,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate          # PVC RWO — rolling deadlocks on attach.
+    type: Recreate          # RWO PVC: rolling deadlocks on attach
   selector:
     matchLabels:
       {{- include "claude-cli.selectorLabels" . | nindent 6 }}
@@ -21,23 +21,19 @@ spec:
       nodeSelector:
         {{- $gpuNS | nindent 8 }}
       {{- end }}
-      # PodSecurity "restricted" profile compliance.
+      # PodSecurity "restricted".
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
-        # Skip the recursive fsGroup chown of the whole PVC on every start —
-        # on NFS with tens of thousands of files it stalls pod init for minutes.
-        # OnRootMismatch only re-chowns when the volume root's owner/perms differ.
+        # Full recursive chown on big NFS PVC stalls init for minutes.
         fsGroupChangePolicy: OnRootMismatch
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
         {{- if .Values.public.web.enabled }}
-        # Let the rootless caddy bind :80/:443. This is a "safe" sysctl (per-pod
-        # net namespace, k8s 1.22+) so it's allowed under PodSecurity
-        # "restricted" — unlike file-caps/NET_BIND_SERVICE, which no_new_privs
-        # (allowPrivilegeEscalation:false) would silently ignore on exec.
+        # Rootless caddy binds :80/:443. Safe sysctl, allowed under "restricted";
+        # file caps/NET_BIND_SERVICE ignored under no_new_privs.
         sysctls:
           - name: net.ipv4.ip_unprivileged_port_start
             value: "0"
@@ -54,10 +50,8 @@ spec:
               find /data/ssh/host-keys -type f -exec chmod 600 {} \;
               find /data/ssh/host-keys -type f -name "*.pub" -exec chmod 644 {} \;
               if [ -d /data/claude.json ]; then rmdir /data/claude.json || true; fi
-              # .claude.json now lives INSIDE the .claude dir (CLAUDE_CONFIG_DIR,
-              # issue #4) so atomic saves work. Migrate the old top-level copy
-              # (/data/claude.json) once, then seed onboarding flags if missing so
-              # the TUI doesn't relaunch the login wizard.
+              # .claude.json lives inside .claude dir (atomic saves). Migrate old
+              # top-level copy once; seed onboarding flags so TUI skips login wizard.
               if [ -f /data/claude.json ] && [ ! -e /data/claude/.claude.json ]; then
                 cp /data/claude.json /data/claude/.claude.json
               fi
@@ -65,11 +59,8 @@ spec:
                 printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > /data/claude/.claude.json
               fi
               [ -e /data/.bash_history ] || touch /data/.bash_history
-              # Bootstrap credentials.json from the Secret on first start, OR
-              # whenever the Secret's value changes (tracked via a hash marker).
-              # The CLI rotates the token in place afterwards; we hash the *seed*
-              # (not the live file), so rotated tokens are preserved across
-              # restarts and we only re-seed when values.yaml creds change.
+              # Seed creds on first start or when Secret value changes. Hash the
+              # seed, not live file → CLI-rotated tokens survive restarts.
               if [ -s /bootstrap/credentials.json ]; then
                 newhash=$(md5sum /bootstrap/credentials.json | cut -d' ' -f1)
                 oldhash=$(cat /data/claude/.cred-bootstrap-hash 2>/dev/null || true)
@@ -79,8 +70,6 @@ spec:
                   printf '%s\n' "$newhash" > /data/claude/.cred-bootstrap-hash
                 fi
               fi
-              # AGENTS.md + skills are seeded from the image by the entrypoint
-              # (single source for docker compose and k8s) — not here.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -130,7 +119,6 @@ spec:
             - name: CLAUDE_WEB_ENABLED
               value: "true"
             {{- with .Values.public.host }}
-            # caddy needs the public host to obtain + serve its TLS cert.
             - name: CLAUDE_WEB_HOST
               value: {{ . | quote }}
             {{- end }}
@@ -139,7 +127,6 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- if .Values.public.web.staging }}
-            # LE staging: untrusted certs, but no rate limit while testing.
             - name: CLAUDE_ACME_CA
               value: "https://acme-staging-v02.api.letsencrypt.org/directory"
             {{- end }}
@@ -155,9 +142,7 @@ spec:
                   optional: true
             {{- end }}
           volumeMounts:
-            # No ~/.claude.json FILE mount (issue #4): it lives inside the
-            # ~/.claude DIRECTORY mount below (CLAUDE_CONFIG_DIR) so atomic
-            # saves work. A file subPath mount can't be replaced by rename().
+            # No ~/.claude.json file mount: subPath file can't be rename()d; lives in ~/.claude dir.
             - { name: data, mountPath: /home/claude/.claude,      subPath: claude }
             - { name: data, mountPath: /home/claude/.ssh,         subPath: ssh }
             - { name: data, mountPath: /home/claude/.config/gh,   subPath: gh }
@@ -188,8 +173,6 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "claude-cli.fullname" . }}-data
         {{- if .Values.shmSize }}
-        # Memory-backed /dev/shm (default is 64Mi). Counts against the pod's
-        # memory limit; sizeLimit caps the tmpfs so it can't exceed it.
         - name: dshm
           emptyDir:
             medium: Memory
@@ -202,4 +185,4 @@ spec:
               - key: credentials.json
                 path: credentials.json
                 mode: 0400
-            optional: true   # Secret may exist without credentialsJson set
+            optional: true   # existingSecret may lack credentials.json

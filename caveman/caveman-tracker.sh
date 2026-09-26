@@ -1,56 +1,51 @@
 #!/bin/sh
-# caveman UserPromptSubmit hook — node-free reimplementation (POSIX sh + jq).
-# Tracks the active level (handles "/caveman <level>", natural-language
-# activation, and "stop caveman"/"normal mode") in the flag file, and re-emits
-# a short reminder each turn so the model does not drift back to verbose.
-# Best-effort: always exit 0.
+# caveman UserPromptSubmit hook (POSIX sh + jq, node-free). Tracks level in flag
+# file ("/caveman <level>", natural-language on/off) and re-emits short reminder
+# each turn so model doesn't drift verbose. Hook → never break session: warn on
+# stderr, always exit 0.
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 FLAG="$CLAUDE_DIR/.caveman-active"
 VALID=" lite full ultra wenyan-lite wenyan wenyan-full wenyan-ultra "
 
-input=$(cat 2>/dev/null)
-prompt=$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+warn() { echo "caveman-tracker: $*" >&2; }
+save() { { mkdir -p "$CLAUDE_DIR" && printf '%s\n' "$1" > "$FLAG"; } || warn "cannot write $FLAG"; }
+clear_flag() { rm -f "$FLAG" || warn "cannot remove $FLAG"; exit 0; }
+
+input=$(cat)
+prompt=$(printf '%s' "$input" | jq -r '.prompt // ""') || { warn "bad hook input JSON"; exit 0; }
+prompt=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
 
 mode=""
 if [ -f "$FLAG" ]; then
-    mode=$(tr -d '[:space:]' < "$FLAG" 2>/dev/null)
+    mode=$(tr -d '[:space:]' < "$FLAG") || warn "cannot read $FLAG"
 fi
 
-# Deactivate.
 case "$prompt" in
     *"stop caveman"*|*"normal mode"*|*"disable caveman"*|*"turn off caveman"*|*"deactivate caveman"*)
-        rm -f "$FLAG" 2>/dev/null
-        exit 0 ;;
+        clear_flag ;;
 esac
 
-# Explicit /caveman command (also matches /caveman:caveman).
+# /caveman [level] (also /caveman:caveman).
 case "$prompt" in
     /caveman*)
         arg=$(printf '%s' "$prompt" | sed -n 's#^/caveman[a-z:-]*[[:space:]][[:space:]]*\([a-z-]*\).*#\1#p')
-        if [ "$arg" = "off" ]; then
-            rm -f "$FLAG" 2>/dev/null
-            exit 0
-        fi
+        [ "$arg" = "off" ] && clear_flag
         if [ -n "$arg" ]; then
             case "$VALID" in *" $arg "*) mode="$arg" ;; esac
         fi
         [ -z "$mode" ] && mode="${CAVEMAN_DEFAULT_MODE:-full}"
-        mkdir -p "$CLAUDE_DIR" 2>/dev/null
-        printf '%s\n' "$mode" > "$FLAG" 2>/dev/null ;;
+        save "$mode" ;;
 esac
 
-# Natural-language activation.
 case "$prompt" in
     *"activate caveman"*|*"enable caveman"*|*"talk like caveman"*|*"caveman mode"*)
         if [ -z "$mode" ]; then
             mode="${CAVEMAN_DEFAULT_MODE:-full}"
-            mkdir -p "$CLAUDE_DIR" 2>/dev/null
-            printf '%s\n' "$mode" > "$FLAG" 2>/dev/null
+            save "$mode"
         fi ;;
 esac
 
-# If active, re-inject the compact reminder.
 if [ -n "$mode" ] && [ "$mode" != "off" ]; then
     printf 'CAVEMAN MODE ACTIVE (%s). Drop articles/filler/pleasantries/hedging. Fragments OK. Code/commits/security: write normal.' "$mode"
 fi

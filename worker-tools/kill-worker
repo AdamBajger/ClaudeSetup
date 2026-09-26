@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# kill-worker <name>  — end a worker's tmux session and drop it from the registry.
+# Leaves the repo dir in place (rm -rf ~/workspaces/<name> to remove it).
+set -euo pipefail
+NAME="${1:?usage: kill-worker <name>}"
+[ "$NAME" = "claude" ] && { echo "refusing: 'claude' is the manager session" >&2; exit 1; }
+tmux kill-session -t "$NAME" 2>/dev/null && echo "killed tmux session '$NAME'" || echo "no tmux session '$NAME'"
+REG=/home/claude/workspaces/.workers.json
+if [ -f "$REG" ]; then
+  tmp=$(mktemp); jq --arg n "$NAME" 'del(.[$n])' "$REG" > "$tmp" && mv "$tmp" "$REG"
+fi
+echo "(repo dir kept: rm -rf /home/claude/workspaces/$NAME to remove)"

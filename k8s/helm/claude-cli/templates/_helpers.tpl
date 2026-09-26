@@ -13,12 +13,7 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{/*
-authorized_keys content. Accepts auth.authorizedKeys as either:
-  - a YAML list of public-key lines (recommended), or
-  - a single multi-line string (back-compat).
-Renders one key per line; the entrypoint dedupes + merges into ~/.ssh/authorized_keys.
-*/}}
+{{/* auth.authorizedKeys: list or multi-line string → one key per line. */}}
 {{- define "claude-cli.authorizedKeys" -}}
 {{- $ak := .Values.auth.authorizedKeys -}}
 {{- if kindIs "slice" $ak -}}
@@ -30,31 +25,17 @@ Renders one key per line; the entrypoint dedupes + merges into ~/.ssh/authorized
 {{- end -}}
 {{- end -}}
 
-{{/* Resolved Secret name — either user-supplied existingSecret or chart-created. */}}
 {{- define "claude-cli.secretName" -}}
-{{- if .Values.auth.existingSecret -}}
-{{- .Values.auth.existingSecret -}}
-{{- else -}}
-{{- include "claude-cli.fullname" . -}}
-{{- end -}}
+{{- .Values.auth.existingSecret | default (include "claude-cli.fullname" .) -}}
 {{- end -}}
 
-{{/*
-GPU resolver — mirrors resolve_gpu() from job-submitting utility.
-Input: .Values.gpu = { type: <JobGPUType>, count: <int> }
-Whole GPUs set nvidia.com/gpu + nodeSelector on nvidia.com/gpu.product.
-MIG instances set nvidia.com/<mig_type> only (no nodeSelector).
-*/}}
+{{/* GPU (mirrors resolve_gpu()): whole GPU → nvidia.com/gpu + product nodeSelector; MIG → nvidia.com/<mig> only. */}}
 {{- define "claude-cli.gpu.limits" -}}
 {{- $g := .Values.gpu | default dict -}}
 {{- if and $g.type $g.count -}}
 {{- $count := $g.count | int -}}
-{{- if eq $g.type "A100"        }}nvidia.com/gpu: {{ $count }}
-{{- else if eq $g.type "A40"         }}nvidia.com/gpu: {{ $count }}
-{{- else if eq $g.type "H100"        }}nvidia.com/gpu: {{ $count }}
-{{- else if eq $g.type "Tesla P100"  }}nvidia.com/gpu: {{ $count }}
-{{- else if eq $g.type "mig-1g.10gb" }}nvidia.com/mig-1g.10gb: {{ $count }}
-{{- else if eq $g.type "mig-2g.20gb" }}nvidia.com/mig-2g.20gb: {{ $count }}
+{{- if has $g.type (list "A100" "A40" "H100" "Tesla P100") }}nvidia.com/gpu: {{ $count }}
+{{- else if has $g.type (list "mig-1g.10gb" "mig-2g.20gb") }}nvidia.com/{{ $g.type }}: {{ $count }}
 {{- else }}{{ fail (printf "Invalid gpu.type: %s" $g.type) }}
 {{- end -}}
 {{- end -}}

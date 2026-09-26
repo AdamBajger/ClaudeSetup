@@ -24,7 +24,7 @@
       Attach: tmux attach -t claude
 
   Persisted via mounts:
-      ~/.claude{,.json}
+      ~/.claude  (incl. .claude.json)
       ~/.ssh
       ~/.config/gh
       ~/workspaces

@@ -1,14 +1,7 @@
-# claude-cli-cloud-run — pre-built Claude Code dev environment (compose).
-#
-# This mirrors the k8s Helm chart (the authoritative setup)
-#
-# Setup:
+# claude-cli-cloud-run (compose). Mirrors k8s Helm chart (authoritative).
 #   cp .env.example .env        # fill AUTHORIZED_KEYS + tokens + credentials
 #   docker compose up -d --build
 #   ssh -p 2222 claude@localhost          # web (caddy) on http://localhost:8080
-#
-# SSH host keys persist in ./container_mounts/.../.ssh (no first-connect warning
-# after rebuilds, unlike before).
 
 services:
   claude:
@@ -19,36 +12,32 @@ services:
     container_name: claude-dev
     hostname: claude-dev
     restart: unless-stopped
-    
+
     shm_size: "16gb"
 
     ports:
-      - "2222:2222"      # ssh (claude user, unprivileged → 2222 in-container too)
-      - "8080:8080"      # caddy web server (chart fronts this with an Ingress)
+      - "2222:2222"      # ssh (rootless sshd)
+      - "8080:8080"      # caddy
 
     environment:
-      # --- auth / tokens (chart: auth.* Secret) ---
-      AUTHORIZED_KEYS: "${AUTHORIZED_KEYS:-}"          # pubkey(s) for SSH, merged + deduped
-      GH_TOKEN: "${GH_TOKEN:-}"                        # gh auth login --with-token
-      HF_TOKEN: "${HF_TOKEN:-}"                        # HuggingFace
-      YT_TOKEN: "${YT_TOKEN:-}"                        # YouTrack permanent token
-      # credentials.json content; entrypoint bootstraps it onto the mount once
-      # (re-seeds only when this value changes). CLI then owns + rotates it.
+      # auth / tokens (chart: auth.* Secret)
+      AUTHORIZED_KEYS: "${AUTHORIZED_KEYS:-}"          # merged + deduped
+      GH_TOKEN: "${GH_TOKEN:-}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      YT_TOKEN: "${YT_TOKEN:-}"
+      # seeded to ~/.claude/.credentials.json; re-seeded only when value changes
       CLAUDE_CREDENTIALS_JSON: "${CLAUDE_CREDENTIALS_JSON:-}"
 
-      # --- integrations (chart: youtrack.host / web.enabled) ---
-      YT_HOST: "${YT_HOST:-}"                          # set → YouTrack MCP configured (with YT_TOKEN)
+      # integrations (chart: youtrack.host / web.enabled)
+      YT_HOST: "${YT_HOST:-}"                          # + YT_TOKEN → YouTrack MCP
       CLAUDE_WEB_ENABLED: "${CLAUDE_WEB_ENABLED:-true}"
 
-      # --- orchestrator autostart (chart: claude.autoStartTmux.*) ---
+      # orchestrator autostart (chart: claude.autoStartTmux.*)
       CLAUDE_AUTOSTART_TMUX_SESSION_NAME: "${CLAUDE_AUTOSTART_TMUX_SESSION_NAME:-claude}"
       CLAUDE_AUTOSTART_CLAUDE_COMMAND: '${CLAUDE_AUTOSTART_CLAUDE_COMMAND:-claude --remote-control "My Orchestrator" --dangerously-skip-permissions}'
 
     volumes:
-      # Persisted state under ./container_mounts/, mirroring the in-container
-      # paths (and the chart's PVC subPaths).
-      # .claude.json now lives inside ~/.claude (CLAUDE_CONFIG_DIR, issue #4) so
-      # atomic saves work; no separate ~/.claude.json bind needed.
+      # mirror in-container paths (= chart PVC subPaths)
       - ./container_mounts/home/claude/.claude:/home/claude/.claude
       - ./container_mounts/home/claude/.ssh:/home/claude/.ssh
       - ./container_mounts/home/claude/.config/gh:/home/claude/.config/gh

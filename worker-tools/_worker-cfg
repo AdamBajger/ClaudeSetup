@@ -1,0 +1,28 @@
+#!/bin/sh
+# _worker-cfg <name> [dir] — prepare + print worker's private CLAUDE_CONFIG_DIR
+# (<dir>/.claudecfg, on PVC). Shared .claude.json → torn writes → onboarding hangs.
+#   .credentials.json  symlink — one OAuth token for all sessions
+#   skills             symlink — image-seeded, refreshed by entrypoint
+#   settings.json      copied once — worker may diverge
+#   .claude.json       seeded — onboarding done + folder trust for its dir
+# Idempotent: call before every launch.
+set -eu
+
+NAME="${1:?usage: _worker-cfg <name> [dir]}"
+DIR="${2:-/home/claude/workspaces/$NAME}"
+SHARED=/home/claude/.claude
+CFG="$DIR/.claudecfg"
+
+mkdir -p "$CFG"
+ln -sfn "$SHARED/.credentials.json" "$CFG/.credentials.json"
+ln -sfn "$SHARED/skills" "$CFG/skills"
+[ -f "$CFG/settings.json" ] || cp "$SHARED/settings.json" "$CFG/settings.json"
+
+# Trust is per-project AND per-config-dir → shared .claude.json doesn't cover worker.
+CJ="$CFG/.claude.json"
+[ -s "$CJ" ] || printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.119"}\n' > "$CJ"
+tmp=$(mktemp)
+jq --arg d "$DIR" '.hasCompletedOnboarding = true | .projects[$d].hasTrustDialogAccepted = true' "$CJ" > "$tmp"
+mv "$tmp" "$CJ"
+
+printf '%s\n' "$CFG"
