@@ -1,5 +1,52 @@
-[scheduled: {{MONITOR_NAME}}] FIRST run Bash `/home/claude/workspaces/bin/slack-lock acquire {{MONITOR_NAME}}`. `LOCKED` → prior run still active (its 3-min polling overran this fire); SKIP entirely: spawn nothing, emit nothing, end turn. `ACQUIRED` → proceed.
+# Scheduled monitor: {{MONITOR_NAME}}
 
-Spawn EXACTLY ONE subagent (Agent tool, general-purpose) to monitor Slack channel {{CHANNEL_NAME}} (channel_id {{CHANNEL_ID}}) per {{PROJECT_DIR}}/SLACK_CRON.md. Subagent does ALL message-reading/reasoning/replying in its OWN context via Slack MCP (ToolSearch: mcp__claude_ai_Slack__slack_read_channel, mcp__claude_ai_Slack__slack_send_message). Key rules: only NEW messages ≤8h old; none new/eligible → stay silent; reply ONLY when clearly warranted (quick+safe `uv run` experiment in {{PROJECT_DIR}}, literature "does X exist" question, impl-detail question answerable from project code, or clear factual error) — accuracy over engagement, no speculation, collegial; every post starts with an automated-agent disclaimer line; post via slack_send_message to {{CHANNEL_ID}} (thread_ts to reply in-thread). After each reply, poll 3 × 3-min per SLACK_CRON.md (`/home/claude/workspaces/bin/slack-lock refresh {{MONITOR_NAME}}` after each poll to keep lock fresh); then end. Hand-off (per SLACK_CRON.md "Hand-off to the project worker"): code work → enqueue task block in {{TASKS_FILE}}, nudge worker via `/home/claude/workspaces/bin/tell-worker {{WORKER_NAME}} "…"`, ack in-thread; at START of each wake post back any worker `-> reply:` results to their threads. Durable memory: append dated bullets to {{NOTES_FILE}} (monitor log, not worker queue).
+Parent session is pure orchestration: acquire lock → spawn one subagent → release lock.
+It does **no** message reading or replying itself — all that lives in the subagent.
 
-AFTER the subagent returns, ALWAYS run Bash `/home/claude/workspaces/bin/slack-lock release {{MONITOR_NAME}}` (even if it errored). PARENT (you): aside from slack-lock acquire/release, emit NOTHING — no narration/summary; discard the subagent's status. (Subagent nudges the worker itself; worker's `-> reply:` posts on the next tick, not by you.)
+## 1. Acquire lock
+
+Run Bash:
+
+```bash
+/home/claude/workspaces/bin/slack-lock acquire {{MONITOR_NAME}}
+```
+
+- `LOCKED` → prior run still active (its polling overran this fire).
+  **Skip entirely**: spawn nothing, emit nothing, end turn.
+- `ACQUIRED` → proceed to step 2.
+
+## 2. Spawn exactly one subagent
+
+Use the Agent tool (`general-purpose`) to monitor Slack channel **{{CHANNEL_NAME}}**.
+Give it **only** this task:
+
+> Read `{{PROJECT_DIR}}/SLACK_CRON.md` **in full first**, then follow it exactly — it is
+> your complete playbook (when to reply, hand-off, disclaimer, polling). Do all message
+> reading / reasoning / replying in your own context via Slack MCP (ToolSearch:
+> `mcp__claude_ai_Slack__slack_read_channel`, `mcp__claude_ai_Slack__slack_send_message`).
+>
+> Parameters for this monitor:
+>
+> | param | value |
+> |-------|-------|
+> | channel | {{CHANNEL_NAME}} (`channel_id={{CHANNEL_ID}}`) |
+> | project dir | `{{PROJECT_DIR}}` |
+> | monitor name (for `slack-lock refresh` while polling) | {{MONITOR_NAME}} |
+> | worker (for hand-off nudge) | {{WORKER_NAME}} |
+> | tasks file (hand-off queue) | `{{TASKS_FILE}}` |
+> | notes file (monitor's own memory) | `{{NOTES_FILE}}` |
+>
+> Return only terse status (`silent`, `replied:N`, `queued:N`, or combos).
+
+## 3. Release lock
+
+After the subagent returns, **always** run Bash (even if it errored):
+
+```bash
+/home/claude/workspaces/bin/slack-lock release {{MONITOR_NAME}}
+```
+
+## Parent rules
+
+- Aside from `slack-lock` acquire/release, emit **nothing** — no narration, no summary.
+- Discard the subagent's returned status.

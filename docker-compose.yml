@@ -41,5 +41,8 @@ services:
       - ./container_mounts/home/claude/.claude:/home/claude/.claude
       - ./container_mounts/home/claude/.ssh:/home/claude/.ssh
       - ./container_mounts/home/claude/.config/gh:/home/claude/.config/gh
+      - ./container_mounts/home/claude/.config/kilo:/home/claude/.config/kilo
+      - ./container_mounts/home/claude/.local/share/kilo:/home/claude/.local/share/kilo
+      - ./container_mounts/home/claude/.local/state/kilo:/home/claude/.local/state/kilo
       - ./container_mounts/home/claude/workspaces:/home/claude/workspaces
       - ./container_mounts/home/claude/.bash_history:/home/claude/.bash_history

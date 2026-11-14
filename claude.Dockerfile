@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="Adam Bajger"
 LABEL description="Pre-built Claude Code dev environment with rootless SSH access. Spin up, ssh in, claude."
-LABEL version="0.8.0"
+LABEL version="0.8.1"
 
 # Layers: stable/slow first, often-edited config last → tweaks skip curl installs.
 
@@ -80,6 +80,14 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal -c clippy -c rustfmt
+
+# Kilo CLI: standalone binary (no node) → ~/.kilo/bin, linked onto PATH. Config/
+# auth/sessions on PVC (chart kilo/* subPaths). Update = rebuild with
+# --build-arg KILO_CACHE_BUST=<new value>. After rustup → bust skips toolchain.
+ARG KILO_CACHE_BUST=0
+RUN curl -fsSL https://kilo.ai/cli/install | bash -s -- --no-modify-path && \
+    ln -sf /home/claude/.kilo/bin/kilo /home/claude/.local/bin/kilo && \
+    /home/claude/.local/bin/kilo --version
 
 # ---------------------------------------------------------------------------
 # 4. Config files + helpers (edited often → bottom)

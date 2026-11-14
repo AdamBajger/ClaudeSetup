@@ -3,7 +3,24 @@
 Notable changes to this deployment, newest first. **Migration notes** record one-off
 steps an existing pod needs; the code itself always describes the current layout only.
 
-## Unreleased (0.8.0)
+## Unreleased (0.8.1)
+
+### Kilo CLI baked; KiloCode settings persisted
+
+- Image ships the Kilo CLI (`kilo`, standalone binary from kilo.ai install script,
+  in `~/.kilo/bin`, linked to `~/.local/bin`). Run it in tmux like `claude`.
+  Refresh with `--build-arg KILO_CACHE_BUST=<new value>`.
+- Chart + compose mount `~/.config/kilo` (kilo.jsonc), `~/.local/share/kilo`
+  (auth.json, kilo.db sessions) and `~/.local/state/kilo` from the PVC (`kilo/*`
+  subPaths). Previously on the container rootfs → lost on every pod restart.
+  Shared by the CLI and the VS Code extension.
+
+#### Migration notes
+
+- Live pod's Kilo state sits on the rootfs; the upgrade restarts the pod and drops it.
+  Copy it out before `helm upgrade` and back after, or re-enter provider + API key once.
+
+## 0.8.0
 
 ### Apps supervised by runit; appctl removed
 

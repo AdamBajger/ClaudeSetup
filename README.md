@@ -4,7 +4,7 @@ Batteries-included [Claude Code](https://code.claude.com/docs) environment. Same
 
 ## What's in the box
 
-- **Claude Code (native build)** + `uv`, Rust, `gh`, `jq`, `tmux`, `caddy`, `openssh`. No Node.
+- **Claude Code (native build)** + Kilo CLI (`kilo`) + `uv`, Rust, `gh`, `jq`, `tmux`, `caddy`, `openssh`. No Node.
 - **Autostarting orchestrator** — long-lived `claude --remote-control` session, coordinates **workers** (one per repo).
 - **Survives restarts** — workers resume conversations; orchestrator starts fresh, re-derives state from worker registry + `MANAGER.md` (injected by SessionStart hook).
 - **Web publishing** — `caddy` serves chosen dirs; k8s Ingress + cert-manager → `https://<you>.<zone>/...` via `webshare add`.
@@ -143,7 +143,7 @@ One shared `caddy` publishes selected dirs — never whole workspace.
 ## Other details
 
 - **PATH** — `~/workspaces/bin` on `PATH` automatically (image env + login profile).
-- **Persistence** — PVC (k8s) / `container_mounts/` (compose): `~/workspaces`, `~/.claude` (+`.claude.json`), `~/.config/gh`, `~/.ssh`. Rest (rootfs, tmux/claude processes, `~/.bashrc`) ephemeral, rebuilt on start.
+- **Persistence** — PVC (k8s) / `container_mounts/` (compose): `~/workspaces`, `~/.claude` (+`.claude.json`), `~/.config/gh`, `~/.ssh`, KiloCode (`~/.config/kilo`, `~/.local/share/kilo`, `~/.local/state/kilo`). Rest (rootfs, tmux/claude processes, `~/.bashrc`) ephemeral, rebuilt on start.
 - **`/dev/shm`** — 16 GiB default (`shmSize` / `shm_size`) for PyTorch-style workloads; counts against memory limit.
 - **GPU (k8s)** — uncomment `gpu:` in values (`A100|A40|H100|Tesla P100|mig-*`); chart sets resource limits + node selector.
 - **MCP tools load at session start** — entrypoint configures them before launching orchestrator. New MCP config → new session (or fresh SSH session) needed.
