@@ -5,6 +5,20 @@ steps an existing pod needs; the code itself always describes the current layout
 
 ## Unreleased (0.8.1)
 
+### Image build + push via GitHub Actions
+
+- `.github/workflows/docker-publish.yml`: manual (`workflow_dispatch`) build of
+  `claude.Dockerfile`, pushed to Docker Hub as `adambajger/claude-cli-cloud-run:<tag>`
+  (default `latest`) plus `sha-<commit>`. Each run busts the Claude CLI layer, so it
+  always bakes the newest CLI; `refresh_kilo` input does the same for Kilo. Job summary
+  prints the baked versions. Trigger from a pod: `gh workflow run docker-publish.yml`.
+
+#### Migration notes
+
+- One-off: add repo secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (Docker Hub
+  access token with read/write). Running pods pick up the new image on next restart
+  (`pullPolicy: Always`).
+
 ### Kilo CLI baked; KiloCode settings persisted
 
 - Image ships the Kilo CLI (`kilo`, standalone binary from kilo.ai install script,
