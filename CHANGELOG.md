@@ -5,6 +5,13 @@ steps an existing pod needs; the code itself always describes the current layout
 
 ## Unreleased (0.8.1)
 
+### Skill: talk-to-sessions
+
+- New skill `talk-to-sessions`: how any agent asks another agent session on the pod
+  (`list-workers`, `tell-worker`, `read-worker`), with a one-shot request protocol,
+  durable `.inbox/` file replies, loop avoidance, and how to handle incoming
+  `[from <name>]` prompts. Seeded to every worker via the shared skills dir.
+
 ### Image build + push via GitHub Actions
 
 - `.github/workflows/docker-publish.yml`: manual (`workflow_dispatch`) build of
