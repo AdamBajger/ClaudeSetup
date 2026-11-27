@@ -1,0 +1,62 @@
+name: Build and push image
+
+# Manual only: builds claude.Dockerfile and pushes to Docker Hub.
+# Needs repo secrets DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (Docker Hub access token, read/write).
+# Run: gh workflow run docker-publish.yml [-f tag=latest] [-f refresh_kilo=true]
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to push (a sha-<commit> tag is always pushed too)
+        default: latest
+        required: true
+      refresh_kilo:
+        description: Also refetch the Kilo CLI
+        type: boolean
+        default: false
+
+env:
+  IMAGE: adambajger/claude-cli-cloud-run
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: claude.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ inputs.tag }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          # Unique bust per run → claude (and optionally kilo) always refetched at latest.
+          build-args: |
+            CLAUDE_CACHE_BUST=${{ github.run_id }}
+            ${{ inputs.refresh_kilo && format('KILO_CACHE_BUST={0}', github.run_id) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report baked CLI versions
+        run: |
+          ref="$IMAGE:sha-${{ github.sha }}"
+          docker pull -q "$ref"
+          {
+            echo "### Pushed \`$IMAGE:${{ inputs.tag }}\`"
+            echo '```'
+            docker run --rm --entrypoint /home/claude/.local/bin/claude "$ref" --version
+            docker run --rm --entrypoint /home/claude/.local/bin/kilo "$ref" --version
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
